@@ -401,7 +401,7 @@ impl<T> WeightedProvider<T> {
 #[derive(Error, Debug)]
 /// Error thrown when sending an HTTP request
 pub enum QuorumError {
-    #[error("No Quorum reached.")]
+    #[error("No Quorum reached. (Values: {:?}, Errors: {:?})", values, errors)]
     NoQuorumReached { values: Vec<Value>, errors: Vec<ProviderError> },
 }
 
