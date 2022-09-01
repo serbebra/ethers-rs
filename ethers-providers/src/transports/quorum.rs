@@ -241,6 +241,17 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
                     self.replace_latest(block).await
                 }
             }
+            "eth_estimateGas" => {
+                // eth_estimateGas has an optional block number as the last index of the json array.
+                // If present, replace it.
+                if let Some(params_arr) = params.as_array_mut() {
+                    if params_arr.len() == 2 {
+                        if let Some(block) = params_arr.last_mut() {
+                            self.replace_latest(block).await
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -499,8 +510,6 @@ where
             QuorumParams::Value(serde_json::to_value(params)?)
         };
         self.normalize_request(method, &mut params).await;
-
-        tracing::warn!(method=?method, params=?params, "QuorumProvider request");
 
         match method {
             "eth_blockNumber" => {
