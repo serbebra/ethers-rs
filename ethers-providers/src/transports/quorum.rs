@@ -500,6 +500,8 @@ where
         };
         self.normalize_request(method, &mut params).await;
 
+        tracing::warn!(method=?method, params=?params, "QuorumProvider request");
+
         match method {
             "eth_blockNumber" => {
                 let block = self.get_quorum_block_number().await?;
@@ -630,7 +632,7 @@ where
 /// Helper type that can be used to pass through the `params` value.
 /// This is necessary because the wrapper provider is supposed to skip the `params` if it's of
 /// size 0, see `crate::transports::common::Request`
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum QuorumParams {
     Value(Value),
     Zst,
