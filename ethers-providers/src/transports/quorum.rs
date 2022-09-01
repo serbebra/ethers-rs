@@ -227,6 +227,7 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
             "eth_getStorageAt" |
             "eth_getCode" |
             "eth_getProof" |
+            "eth_estimateGas" |
             "trace_call" |
             "trace_block" => {
                 // calls that include the block number in the params at the last index of json array
@@ -239,17 +240,6 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
                 // array
                 if let Some(block) = params.as_array_mut().and_then(|arr| arr.first_mut()) {
                     self.replace_latest(block).await
-                }
-            }
-            "eth_estimateGas" => {
-                // eth_estimateGas has an optional block number as the last index of the json array.
-                // If present, replace it.
-                if let Some(params_arr) = params.as_array_mut() {
-                    if params_arr.len() == 2 {
-                        if let Some(block) = params_arr.last_mut() {
-                            self.replace_latest(block).await
-                        }
-                    }
                 }
             }
             _ => {}
