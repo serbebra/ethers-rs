@@ -631,7 +631,7 @@ where
 /// Helper type that can be used to pass through the `params` value.
 /// This is necessary because the wrapper provider is supposed to skip the `params` if it's of
 /// size 0, see `crate::transports::common::Request`
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum QuorumParams {
     Value(Value),
     Zst,
