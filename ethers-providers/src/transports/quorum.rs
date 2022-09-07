@@ -193,13 +193,13 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
         });
 
         // find the highest possible block number a quorum agrees on
-        let mut weight_set = vec![];
+        let mut cumulative_weight = 0;
         let mut block = U64::from(0);
         for (provider, n) in numbers.iter().copied() {
-            weight_set.push(provider);
+            cumulative_weight += provider.weight;
             debug_assert!(block == U64::from(0) || block >= n);
             block = n;
-            if self.quorum.weight(weight_set.iter().copied()) >= self.quorum_weight {
+            if cumulative_weight >= self.quorum_weight {
                 return Ok(block)
             }
         }
@@ -277,23 +277,20 @@ pub enum Quorum {
 }
 
 impl Quorum {
-    fn weight<'a, T: 'a>(
-        self,
-        providers: impl IntoIterator<Item = &'a WeightedProvider<T>>,
-    ) -> u64 {
+    fn weight<T>(self, providers: &[WeightedProvider<T>]) -> u64 {
         match self {
-            Quorum::All => providers.into_iter().map(|p| p.weight).sum::<u64>(),
+            Quorum::All => providers.iter().map(|p| p.weight).sum::<u64>(),
             Quorum::Majority => {
-                let total = providers.into_iter().map(|p| p.weight).sum::<u64>();
+                let total = providers.iter().map(|p| p.weight).sum::<u64>();
                 let rem = total % 2;
                 total / 2 + rem
             }
             Quorum::Percentage(p) => {
-                providers.into_iter().map(|p| p.weight).sum::<u64>() * (p as u64) / 100
+                providers.iter().map(|p| p.weight).sum::<u64>() * (p as u64) / 100
             }
             Quorum::ProviderCount(num) => {
                 // take the lowest `num` weights
-                let mut weights = providers.into_iter().map(|p| p.weight).collect::<Vec<_>>();
+                let mut weights = providers.iter().map(|p| p.weight).collect::<Vec<_>>();
                 weights.sort_unstable();
                 weights.into_iter().take(num).sum()
             }
@@ -683,6 +680,95 @@ mod tests {
                 assert_eq!(requested as u64, w);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_quorum_block_number() {
+        let mut providers = Vec::new();
+        let mut mocked = Vec::new();
+
+        for value in [100, 101, 68, 100, 102] {
+            let mock = MockProvider::new();
+            for _ in 0..6 {
+                mock.push(U64::from(value)).unwrap();
+            }
+            providers.push(WeightedProvider::new(mock.clone()));
+            mocked.push(mock);
+        }
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::ProviderCount(5))
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 68);
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::ProviderCount(4))
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 100);
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::ProviderCount(3))
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 100);
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::ProviderCount(2))
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 101);
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::ProviderCount(1))
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 102);
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::Majority)
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_get_quorum_block_number_with_errors() {
+        let mut providers = Vec::new();
+        let mut mocked = Vec::new();
+
+        let mock = MockProvider::new();
+        for _ in 0..2 {
+            mock.push(U64::from(100)).unwrap();
+        }
+        providers.push(WeightedProvider::new(mock.clone()));
+        mocked.push(mock);
+
+        let mock = MockProvider::new();
+        // this one will error
+        providers.push(WeightedProvider::new(mock.clone()));
+        mocked.push(mock);
+
+        let mock = MockProvider::new();
+
+        for _ in 0..2 {
+            mock.push(U64::from(101)).unwrap();
+        }
+        providers.push(WeightedProvider::new(mock.clone()));
+        mocked.push(mock);
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::ProviderCount(2))
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 100);
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::Majority)
+            .build();
+        assert_eq!(quorum.get_quorum_block_number().await.unwrap().as_u64(), 100);
     }
 
     #[tokio::test]
