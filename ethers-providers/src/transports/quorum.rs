@@ -766,6 +766,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_quorum_block_number_fails_to_reach_quorum() {
+        let mut providers = Vec::new();
+
+        let mock = MockProvider::new();
+        for _ in 0..2 {
+            mock.push(U64::from(100)).unwrap();
+        }
+        providers.push(WeightedProvider::new(mock.clone()));
+
+        let mock = MockProvider::new();
+        // this one will error
+        providers.push(WeightedProvider::new(mock.clone()));
+
+        let mock = MockProvider::new();
+        // this one will error
+        providers.push(WeightedProvider::new(mock.clone()));
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::ProviderCount(2))
+            .build();
+        assert!(quorum.get_quorum_block_number().await.is_err());
+
+        let quorum = QuorumProvider::builder()
+            .add_providers(providers.clone())
+            .quorum(Quorum::Majority)
+            .build();
+        assert!(quorum.get_quorum_block_number().await.is_err());
+    }
+
+    #[tokio::test]
     async fn majority_quorum() {
         test_quorum(Quorum::Majority).await
     }
