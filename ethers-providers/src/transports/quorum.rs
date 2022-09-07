@@ -685,7 +685,6 @@ mod tests {
     #[tokio::test]
     async fn test_get_quorum_block_number() {
         let mut providers = Vec::new();
-        let mut mocked = Vec::new();
 
         for value in [100, 101, 68, 100, 102] {
             let mock = MockProvider::new();
@@ -693,7 +692,6 @@ mod tests {
                 mock.push(U64::from(value)).unwrap();
             }
             providers.push(WeightedProvider::new(mock.clone()));
-            mocked.push(mock);
         }
 
         let quorum = QuorumProvider::builder()
@@ -736,19 +734,16 @@ mod tests {
     #[tokio::test]
     async fn test_get_quorum_block_number_with_errors() {
         let mut providers = Vec::new();
-        let mut mocked = Vec::new();
 
         let mock = MockProvider::new();
         for _ in 0..2 {
             mock.push(U64::from(100)).unwrap();
         }
         providers.push(WeightedProvider::new(mock.clone()));
-        mocked.push(mock);
 
         let mock = MockProvider::new();
         // this one will error
         providers.push(WeightedProvider::new(mock.clone()));
-        mocked.push(mock);
 
         let mock = MockProvider::new();
 
@@ -756,7 +751,6 @@ mod tests {
             mock.push(U64::from(101)).unwrap();
         }
         providers.push(WeightedProvider::new(mock.clone()));
-        mocked.push(mock);
 
         let quorum = QuorumProvider::builder()
             .add_providers(providers.clone())
