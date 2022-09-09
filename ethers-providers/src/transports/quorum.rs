@@ -526,15 +526,16 @@ where
                     .collect::<Vec<_>>();
 
                 let mut errors = vec![];
-                let mut succeeded = false;
+                let mut succeeded = None;
                 // this does assume that there is a timeout on providers, otherwise it might hang.
                 while !requests.is_empty() {
                     let ((res, _quorum_idx), _requests_idx, remaining) =
                         future::select_all(requests).await;
                     match res {
-                        Ok(_) => {
-                            succeeded = true;
+                        Ok(value) if succeeded.is_none() => {
+                            succeeded = Some(value);
                         }
+                        Ok(_) => {}
                         Err(err) => {
                             errors.push(err);
                         }
@@ -542,7 +543,7 @@ where
                     requests = remaining;
                 }
 
-                if succeeded {
+                if let Some(value) = succeeded {
                     Ok(serde_json::from_value(value)?)
                 } else {
                     Err(QuorumError::NoQuorumReached { values: vec![], errors }.into())
