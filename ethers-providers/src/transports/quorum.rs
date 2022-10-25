@@ -160,16 +160,30 @@ impl<T> QuorumProviderBuilder<T> {
 }
 
 impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
-    /// Returns the block height that a _quorum_ of providers have reached.
-    async fn get_quorum_block_number(&self) -> Result<U64, QuorumError> {
+
+    /// For each inner provider, attempts to perform an RPC that returns a numeric value.
+    /// This a quorum of the highest numbers returned by inner providers, and returns the minimum
+    /// of these numbers.
+    /// For example, if the quorum threshold is 2 of a set of 5 inner providers, and the following
+    /// numbers are returned: [100, 101, 102, 103, 104], 103 will be returned.
+    /// This is useful for getting block numbers or gas estimates.
+    async fn get_highest_quorum_number<N>(
+        &self,
+        method: &str,
+        params: QuorumParams,
+    ) -> Result<N, QuorumError>
+    where
+        N: Serialize + DeserializeOwned + Debug + Ord + Copy + Default
+    {
         let mut queries = self
             .providers
             .iter()
             .map(|provider| {
+                let params_clone = params.clone();
                 Box::pin(async move {
                     let block =
-                        provider.inner.request("eth_blockNumber", QuorumParams::Zst).await?;
-                    serde_json::from_value::<U64>(block)
+                        provider.inner.request(method, params_clone).await?;
+                    serde_json::from_value::<N>(block)
                         .map(|b| (provider, b))
                         .map_err(ProviderError::from)
                 })
@@ -194,22 +208,38 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
 
         // find the highest possible block number a quorum agrees on
         let mut cumulative_weight = 0;
-        let mut block = U64::from(0);
+        let mut aggregated_num: Option<N> = None;
+
         for (provider, n) in numbers.iter().copied() {
             cumulative_weight += provider.weight;
-            debug_assert!(block == U64::from(0) || block >= n);
-            block = n;
+            // Sanity check the sorting
+            debug_assert!(aggregated_num.is_none() || aggregated_num.unwrap() >= n);
+            aggregated_num = Some(n);
             if cumulative_weight >= self.quorum_weight {
-                return Ok(block)
+                return Ok(aggregated_num.unwrap())
             }
         }
         Err(QuorumError::NoQuorumReached {
             values: numbers
                 .into_iter()
-                .map(|(_, block)| serde_json::to_value(block).expect("Failed to serialize U64"))
+                .map(|(_, number)| serde_json::to_value(number).expect("Failed to serialize number"))
                 .collect(),
             errors,
         })
+    }
+
+    /// Returns the block height that a _quorum_ of providers have reached.
+    async fn get_quorum_block_number(&self) -> Result<U64, QuorumError> {
+        self
+            .get_highest_quorum_number("eth_blockNumber", QuorumParams::Zst)
+            .await
+    }
+
+    /// Returns the gas estimate that a _quorum_ of providers have reached.
+    async fn get_quorum_estimate_gas(&self, params: QuorumParams) -> Result<U256, QuorumError> {
+        self
+            .get_highest_quorum_number("eth_estimateGas", params)
+            .await
     }
 
     /// Normalizes the request payload depending on the call
@@ -505,7 +535,14 @@ where
                 // type R is and adding constraints for just this case feels wrong.
                 let value = serde_json::to_value(block).expect("Failed to serialize U64");
                 Ok(serde_json::from_value(value)?)
-            }
+            },
+            "eth_estimateGas" => {
+                let estimated_gas = self.get_quorum_estimate_gas(params).await?;
+                // a little janky to convert to a string and back but we don't know for sure what
+                // type R is and adding constraints for just this case feels wrong.
+                let value = serde_json::to_value(estimated_gas).expect("Failed to serialize U256");
+                Ok(serde_json::from_value(value)?)
+            },
             "eth_sendTransaction" | "eth_sendRawTransaction" => {
                 // non-idempotent requests may fail due to delays in processing even though the
                 // operation was a success.
