@@ -233,11 +233,6 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
         self.get_quorum_number("eth_blockNumber", QuorumParams::Zst).await
     }
 
-    /// Returns the gas estimate that a _quorum_ of providers have reached.
-    async fn get_quorum_estimate_gas(&self, params: QuorumParams) -> Result<U256, QuorumError> {
-        self.get_quorum_number("eth_estimateGas", params).await
-    }
-
     /// Normalizes the request payload depending on the call
     async fn normalize_request(&self, method: &str, q_params: &mut QuorumParams) {
         let params = if let QuorumParams::Value(v) = q_params {
@@ -525,18 +520,17 @@ where
         self.normalize_request(method, &mut params).await;
 
         match method {
-            "eth_blockNumber" => {
-                let block = self.get_quorum_block_number().await?;
+            // TODO: to robustly support eip-1559, we will likely need to also support
+            // eth_feeHistory. This returns an object with various numbers rather than a
+            // sinsgle number, so we'll need some additional code to handle this case.
+
+            // For RPCs that return numbers that can vary amongst inner providers, come to quorum on
+            // a single number
+            "eth_blockNumber" | "eth_estimateGas" | "eth_gasPrice" | "eth_maxPriorityFeePerGas" => {
+                let number = self.get_quorum_number(method, params).await?;
                 // a little janky to convert to a string and back but we don't know for sure what
                 // type R is and adding constraints for just this case feels wrong.
-                let value = serde_json::to_value(block).expect("Failed to serialize U64");
-                Ok(serde_json::from_value(value)?)
-            }
-            "eth_estimateGas" => {
-                let estimated_gas = self.get_quorum_estimate_gas(params).await?;
-                // a little janky to convert to a string and back but we don't know for sure what
-                // type R is and adding constraints for just this case feels wrong.
-                let value = serde_json::to_value(estimated_gas).expect("Failed to serialize U256");
+                let value = serde_json::to_value(number).expect("Failed to serialize number");
                 Ok(serde_json::from_value(value)?)
             }
             "eth_sendTransaction" | "eth_sendRawTransaction" => {
@@ -732,12 +726,12 @@ mod tests {
         let quorum_weight = quorum.quorum_weight;
 
         let provider = Provider::quorum(quorum);
-        let blk = provider.get_gas_price().await.unwrap();
+        let blk = provider.get_chainid().await.unwrap();
         assert_eq!(blk, value);
 
         // count the number of providers that returned a value
         let requested =
-            mocked.iter().filter(|mock| mock.assert_request("eth_gasPrice", ()).is_ok()).count();
+            mocked.iter().filter(|mock| mock.assert_request("eth_chainId", ()).is_ok()).count();
 
         match q {
             Quorum::All => {
