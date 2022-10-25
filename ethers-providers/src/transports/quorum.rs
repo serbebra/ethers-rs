@@ -160,7 +160,6 @@ impl<T> QuorumProviderBuilder<T> {
 }
 
 impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
-
     /// For each inner provider, attempts to perform an RPC that returns a numeric value.
     /// This a quorum of the highest numbers returned by inner providers, and returns the minimum
     /// of these numbers.
@@ -173,7 +172,7 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
         params: QuorumParams,
     ) -> Result<N, QuorumError>
     where
-        N: Serialize + DeserializeOwned + Debug + Ord + Copy + Default
+        N: Serialize + DeserializeOwned + Ord + Copy,
     {
         let mut queries = self
             .providers
@@ -181,8 +180,7 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
             .map(|provider| {
                 let params_clone = params.clone();
                 Box::pin(async move {
-                    let block =
-                        provider.inner.request(method, params_clone).await?;
+                    let block = provider.inner.request(method, params_clone).await?;
                     serde_json::from_value::<N>(block)
                         .map(|b| (provider, b))
                         .map_err(ProviderError::from)
@@ -222,7 +220,9 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
         Err(QuorumError::NoQuorumReached {
             values: numbers
                 .into_iter()
-                .map(|(_, number)| serde_json::to_value(number).expect("Failed to serialize number"))
+                .map(|(_, number)| {
+                    serde_json::to_value(number).expect("Failed to serialize number")
+                })
                 .collect(),
             errors,
         })
@@ -230,16 +230,12 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
 
     /// Returns the block height that a _quorum_ of providers have reached.
     async fn get_quorum_block_number(&self) -> Result<U64, QuorumError> {
-        self
-            .get_highest_quorum_number("eth_blockNumber", QuorumParams::Zst)
-            .await
+        self.get_highest_quorum_number("eth_blockNumber", QuorumParams::Zst).await
     }
 
     /// Returns the gas estimate that a _quorum_ of providers have reached.
     async fn get_quorum_estimate_gas(&self, params: QuorumParams) -> Result<U256, QuorumError> {
-        self
-            .get_highest_quorum_number("eth_estimateGas", params)
-            .await
+        self.get_highest_quorum_number("eth_estimateGas", params).await
     }
 
     /// Normalizes the request payload depending on the call
@@ -535,14 +531,14 @@ where
                 // type R is and adding constraints for just this case feels wrong.
                 let value = serde_json::to_value(block).expect("Failed to serialize U64");
                 Ok(serde_json::from_value(value)?)
-            },
+            }
             "eth_estimateGas" => {
                 let estimated_gas = self.get_quorum_estimate_gas(params).await?;
                 // a little janky to convert to a string and back but we don't know for sure what
                 // type R is and adding constraints for just this case feels wrong.
                 let value = serde_json::to_value(estimated_gas).expect("Failed to serialize U256");
                 Ok(serde_json::from_value(value)?)
-            },
+            }
             "eth_sendTransaction" | "eth_sendRawTransaction" => {
                 // non-idempotent requests may fail due to delays in processing even though the
                 // operation was a success.
