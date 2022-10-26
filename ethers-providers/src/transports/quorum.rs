@@ -180,8 +180,8 @@ impl<T: JsonRpcClientWrapper> QuorumProvider<T> {
             .map(|provider| {
                 let params_clone = params.clone();
                 Box::pin(async move {
-                    let block = provider.inner.request(method, params_clone).await?;
-                    serde_json::from_value::<N>(block)
+                    let num = provider.inner.request(method, params_clone).await?;
+                    serde_json::from_value::<N>(num)
                         .map(|b| (provider, b))
                         .map_err(ProviderError::from)
                 })
@@ -522,12 +522,12 @@ where
         match method {
             // TODO: to robustly support eip-1559, we will likely need to also support
             // eth_feeHistory. This returns an object with various numbers rather than a
-            // sinsgle number, so we'll need some additional code to handle this case.
+            // single number, so we'll need some additional code to handle this case.
 
             // For RPCs that return numbers that can vary amongst inner providers, come to quorum on
             // a single number
             "eth_blockNumber" | "eth_estimateGas" | "eth_gasPrice" | "eth_maxPriorityFeePerGas" => {
-                let number = self.get_quorum_number(method, params).await?;
+                let number: U256 = self.get_quorum_number(method, params).await?;
                 // a little janky to convert to a string and back but we don't know for sure what
                 // type R is and adding constraints for just this case feels wrong.
                 let value = serde_json::to_value(number).expect("Failed to serialize number");
