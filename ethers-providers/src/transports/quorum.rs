@@ -1,5 +1,4 @@
 use std::{
-    convert::{TryFrom, TryInto},
     fmt::Debug,
     future::Future,
     pin::Pin,
@@ -512,7 +511,7 @@ where
         method: &str,
         params: T,
     ) -> Result<R, Self::Error> {
-        let mut params = params.try_into()?;
+        let mut params = WrappedParams::new(params)?;
         self.normalize_request(method, &mut params).await;
 
         match method {
@@ -700,10 +699,8 @@ pub enum WrappedParams {
     Zst,
 }
 
-impl<T: Serialize> TryFrom<T> for WrappedParams {
-    type Error = serde_json::Error;
-
-    fn try_from(value: T) -> Result<Self, Self::Error> {
+impl WrappedParams {
+    fn new<T: Serialize>(params: T) -> Result<Self, serde_json::Error> {
         Ok(if std::mem::size_of::<T>() == 0 {
             // we don't want `()` to become `"null"`.
             WrappedParams::Zst
