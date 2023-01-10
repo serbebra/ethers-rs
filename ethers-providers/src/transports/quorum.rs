@@ -700,7 +700,7 @@ pub enum WrappedParams {
 }
 
 impl WrappedParams {
-    fn new<T: Serialize>(params: T) -> Result<Self, serde_json::Error> {
+    pub fn new<T: Serialize>(params: T) -> Result<Self, serde_json::Error> {
         Ok(if std::mem::size_of::<T>() == 0 {
             // we don't want `()` to become `"null"`.
             WrappedParams::Zst
