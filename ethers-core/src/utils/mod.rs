@@ -78,7 +78,7 @@ pub const EIP1559_FEE_ESTIMATION_PAST_BLOCKS: u64 = 10;
 /// The default percentile of gas premiums that are fetched for fee estimation.
 pub const EIP1559_FEE_ESTIMATION_REWARD_PERCENTILE: f64 = 5.0;
 /// The default max priority fee per gas, used in case the base fee is within a threshold.
-pub const EIP1559_FEE_ESTIMATION_DEFAULT_PRIORITY_FEE: u64 = 3_000_000_000;
+pub const EIP1559_FEE_ESTIMATION_DEFAULT_PRIORITY_FEE: u64 = 100_000_000;
 /// The threshold for base fee below which we use the default priority fee, and beyond which we
 /// estimate an appropriate value for priority fee.
 pub const EIP1559_FEE_ESTIMATION_PRIORITY_FEE_TRIGGER: u64 = 100_000_000_000;
