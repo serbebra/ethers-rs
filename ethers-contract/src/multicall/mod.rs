@@ -12,7 +12,7 @@ use crate::{
 };
 
 mod multicall_contract;
-use multicall_contract::multicall_3::{
+pub use multicall_contract::multicall_3::{
     Call as Multicall1Call, Call3 as Multicall3Call, Call3Value as Multicall3CallValue,
     Result as MulticallResult,
 };
