@@ -1,6 +1,11 @@
-//! Bindings for [etherscan.io web api](https://docs.etherscan.io/)
+#![doc = include_str!("../README.md")]
+#![deny(unsafe_code, rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-use crate::errors::is_blocked_by_cloudflare_response;
+use crate::errors::{
+    is_blocked_by_cloudflare_response, is_cloudflare_security_challenge,
+    is_security_challenge_prompt,
+};
 use contract::ContractMetadata;
 use errors::EtherscanError;
 use ethers_core::{
@@ -18,15 +23,17 @@ use std::{
 use tracing::{error, trace};
 
 pub mod account;
+pub mod blocks;
 pub mod contract;
 pub mod errors;
 pub mod gas;
 pub mod source_tree;
-pub mod transaction;
+pub mod stats;
+mod transaction;
 pub mod utils;
 pub mod verify;
 
-pub(crate) type Result<T> = std::result::Result<T, EtherscanError>;
+pub(crate) type Result<T, E = EtherscanError> = std::result::Result<T, E>;
 
 /// The Etherscan.io API client.
 #[derive(Clone, Debug)]
@@ -34,7 +41,7 @@ pub struct Client {
     /// Client that executes HTTP requests
     client: reqwest::Client,
     /// Etherscan API key
-    api_key: String,
+    api_key: Option<String>,
     /// Etherscan API endpoint like <https://api(-chain).etherscan.io/api>
     etherscan_api_url: Url,
     /// Etherscan base endpoint like <https://etherscan.io>
@@ -45,6 +52,7 @@ pub struct Client {
 
 impl Client {
     /// Creates a `ClientBuilder` to configure a `Client`.
+    ///
     /// This is the same as `ClientBuilder::default()`.
     ///
     /// # Example
@@ -76,33 +84,15 @@ impl Client {
     }
 
     /// Create a new client with the correct endpoints based on the chain and API key
-    /// from ETHERSCAN_API_KEY environment variable
+    /// from the default environment variable defined in [`Chain`].
     pub fn new_from_env(chain: Chain) -> Result<Self> {
         let api_key = match chain {
-            Chain::Avalanche | Chain::AvalancheFuji => std::env::var("SNOWTRACE_API_KEY")?,
-            Chain::Polygon | Chain::PolygonMumbai => std::env::var("POLYGONSCAN_API_KEY")?,
-            Chain::Mainnet |
-            Chain::Morden |
-            Chain::Ropsten |
-            Chain::Kovan |
-            Chain::Rinkeby |
-            Chain::Goerli |
-            Chain::Optimism |
-            Chain::OptimismGoerli |
-            Chain::OptimismKovan |
-            Chain::BinanceSmartChain |
-            Chain::BinanceSmartChainTestnet |
-            Chain::Arbitrum |
-            Chain::ArbitrumTestnet |
-            Chain::ArbitrumGoerli |
-            Chain::Cronos |
-            Chain::CronosTestnet |
-            Chain::Aurora |
-            Chain::AuroraTestnet => std::env::var("ETHERSCAN_API_KEY")?,
-            Chain::Fantom | Chain::FantomTestnet => {
-                std::env::var("FTMSCAN_API_KEY").or_else(|_| std::env::var("FANTOMSCAN_API_KEY"))?
-            }
-            Chain::XDai |
+            // Extra aliases
+            Chain::Fantom | Chain::FantomTestnet => std::env::var("FMTSCAN_API_KEY")
+                .or_else(|_| std::env::var("FANTOMSCAN_API_KEY"))
+                .map_err(Into::into),
+
+            // Backwards compatibility, ideally these should return an error.
             Chain::Chiado |
             Chain::Sepolia |
             Chain::Rsk |
@@ -112,15 +102,29 @@ impl Client {
             Chain::Emerald |
             Chain::EmeraldTestnet |
             Chain::Evmos |
-            Chain::EvmosTestnet => String::default(),
-            Chain::Moonbeam | Chain::Moonbase | Chain::MoonbeamDev | Chain::Moonriver => {
-                std::env::var("MOONSCAN_API_KEY")?
-            }
-            Chain::AnvilHardhat | Chain::Dev => {
-                return Err(EtherscanError::LocalNetworksNotSupported)
-            }
-        };
+            Chain::EvmosTestnet => Ok(String::new()),
+            Chain::AnvilHardhat | Chain::Dev => Err(EtherscanError::LocalNetworksNotSupported),
+
+            _ => chain
+                .etherscan_api_key_name()
+                .ok_or_else(|| EtherscanError::ChainNotSupported(chain))
+                .and_then(|key_name| std::env::var(key_name).map_err(Into::into)),
+        }?;
         Self::new(chain, api_key)
+    }
+
+    /// Create a new client with the correct endpoints based on the chain and API key
+    /// from the default environment variable defined in [`Chain`].
+    ///
+    /// If the environment variable is not set, create a new client without it.
+    pub fn new_from_opt_env(chain: Chain) -> Result<Self> {
+        match Self::new_from_env(chain) {
+            Ok(client) => Ok(client),
+            Err(EtherscanError::EnvVarNotFound(_)) => {
+                Self::builder().chain(chain).and_then(|c| c.build())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Sets the root to the cache dir and the ttl to use
@@ -203,22 +207,29 @@ impl Client {
         let res = res.as_ref();
         let res: ResponseData<T> = serde_json::from_str(res).map_err(|err| {
             error!(target: "etherscan", ?res, "Failed to deserialize response: {}", err);
-            if is_blocked_by_cloudflare_response(res) {
+            if res == "Page not found" {
+                EtherscanError::PageNotFound
+            } else if is_blocked_by_cloudflare_response(res) {
                 EtherscanError::BlockedByCloudflare
+            } else if is_cloudflare_security_challenge(res) {
+                EtherscanError::CloudFlareSecurityChallenge
+            } else if is_security_challenge_prompt(res) {
+                EtherscanError::SecurityChallenge(self.etherscan_api_url.clone())
             } else {
                 EtherscanError::Serde(err)
             }
         })?;
 
         match res {
-            ResponseData::Error { result, .. } => {
-                if result.starts_with("Max rate limit reached") {
-                    Err(EtherscanError::RateLimitExceeded)
-                } else if result.to_lowercase() == "invalid api key" {
-                    Err(EtherscanError::InvalidApiKey)
-                } else {
-                    Err(EtherscanError::Unknown(result))
+            ResponseData::Error { result, message, status } => {
+                if let Some(ref result) = result {
+                    if result.starts_with("Max rate limit reached") {
+                        return Err(EtherscanError::RateLimitExceeded)
+                    } else if result.to_lowercase() == "invalid api key" {
+                        return Err(EtherscanError::InvalidApiKey)
+                    }
                 }
+                Err(EtherscanError::ErrorResponse { status, message, result })
             }
             ResponseData::Success(res) => Ok(res),
         }
@@ -231,7 +242,7 @@ impl Client {
         other: T,
     ) -> Query<T> {
         Query {
-            apikey: Cow::Borrowed(&self.api_key),
+            apikey: self.api_key.as_deref().map(Cow::Borrowed),
             module: Cow::Borrowed(module),
             action: Cow::Borrowed(action),
             other,
@@ -281,7 +292,7 @@ impl ClientBuilder {
     ///
     /// Fails if the `etherscan_url` is not a valid `Url`
     pub fn with_url(mut self, etherscan_url: impl IntoUrl) -> Result<Self> {
-        self.etherscan_url = Some(etherscan_url.into_url()?);
+        self.etherscan_url = Some(ensure_url(etherscan_url)?);
         Ok(self)
     }
 
@@ -297,13 +308,13 @@ impl ClientBuilder {
     ///
     /// Fails if the `etherscan_api_url` is not a valid `Url`
     pub fn with_api_url(mut self, etherscan_api_url: impl IntoUrl) -> Result<Self> {
-        self.etherscan_api_url = Some(etherscan_api_url.into_url()?);
+        self.etherscan_api_url = Some(ensure_url(etherscan_api_url)?);
         Ok(self)
     }
 
     /// Configures the etherscan api key
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
+        self.api_key = Some(api_key.into()).filter(|s| !s.is_empty());
         self
     }
 
@@ -316,8 +327,8 @@ impl ClientBuilder {
     /// Returns a Client that uses this ClientBuilder configuration.
     ///
     /// # Errors
-    /// if required fields are missing:
-    ///   - `api_key`
+    ///
+    /// If the following required fields are missing:
     ///   - `etherscan_api_url`
     ///   - `etherscan_url`
     pub fn build(self) -> Result<Client> {
@@ -325,8 +336,7 @@ impl ClientBuilder {
 
         let client = Client {
             client: client.unwrap_or_default(),
-            api_key: api_key
-                .ok_or_else(|| EtherscanError::Builder("etherscan api key".to_string()))?,
+            api_key,
             etherscan_api_url: etherscan_api_url
                 .ok_or_else(|| EtherscanError::Builder("etherscan api url".to_string()))?,
             etherscan_url: etherscan_url
@@ -394,21 +404,14 @@ impl Cache {
 
     fn get<T: DeserializeOwned>(&self, prefix: &str, address: Address) -> Option<T> {
         let path = self.root.join(prefix).join(format!("{address:?}.json"));
-        let reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
-        if let Ok(inner) = serde_json::from_reader::<_, CacheEnvelope<T>>(reader) {
-            // If this does not return None then we have passed the expiry
-            if SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("system time is before unix epoch")
-                .checked_sub(Duration::from_secs(inner.expiry))
-                .is_some()
-            {
-                return None
-            }
-
-            return Some(inner.data)
-        }
-        None
+        let Ok(contents) = std::fs::read_to_string(path) else { return None };
+        let Ok(inner) = serde_json::from_str::<CacheEnvelope<T>>(&contents) else { return None };
+        // If this does not return None then we have passed the expiry
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is before unix epoch")
+            .checked_sub(Duration::from_secs(inner.expiry))
+            .map(|_| inner.data)
     }
 }
 
@@ -424,39 +427,63 @@ pub struct Response<T> {
 #[serde(untagged)]
 pub enum ResponseData<T> {
     Success(Response<T>),
-    Error { status: String, message: String, result: String },
+    Error { status: String, message: String, result: Option<String> },
 }
 
 /// The type that gets serialized as query
 #[derive(Clone, Debug, Serialize)]
 struct Query<'a, T: Serialize> {
-    apikey: Cow<'a, str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    apikey: Option<Cow<'a, str>>,
     module: Cow<'a, str>,
     action: Cow<'a, str>,
     #[serde(flatten)]
     other: T,
 }
 
+/// Ensures that the url is well formatted to be used by the Client's functions that join paths.
+fn ensure_url(url: impl IntoUrl) -> std::result::Result<Url, reqwest::Error> {
+    let url_str = url.as_str();
+
+    // ensure URL ends with `/`
+    if url_str.ends_with('/') {
+        url.into_url()
+    } else {
+        into_url(format!("{url_str}/"))
+    }
+}
+
+/// This is a hack to work around `IntoUrl`'s sealed private functions, which can't be called
+/// normally.
+#[inline]
+fn into_url(url: impl IntoUrl) -> std::result::Result<Url, reqwest::Error> {
+    url.into_url()
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{Client, EtherscanError};
+    use crate::{Client, EtherscanError, ResponseData};
     use ethers_core::types::{Address, Chain, H256};
-    use std::{
-        future::Future,
-        time::{Duration, SystemTime},
-    };
+
+    // <https://github.com/foundry-rs/foundry/issues/4406>
+    #[test]
+    fn can_parse_block_scout_err() {
+        let err = "{\"message\":\"Something went wrong.\",\"result\":null,\"status\":\"0\"}";
+        let resp: ResponseData<Address> = serde_json::from_str(err).unwrap();
+        assert!(matches!(resp, ResponseData::Error { .. }));
+    }
 
     #[test]
-    fn chain_not_supported() {
-        let err = Client::new_from_env(Chain::Morden).unwrap_err();
+    fn test_api_paths() {
+        let client = Client::new(Chain::Goerli, "").unwrap();
+        assert_eq!(client.etherscan_api_url.as_str(), "https://api-goerli.etherscan.io/api/");
 
-        assert!(matches!(err, EtherscanError::ChainNotSupported(_)));
-        assert_eq!(err.to_string(), "Chain morden not supported");
+        assert_eq!(client.block_url(100), "https://goerli.etherscan.io/block/100");
     }
 
     #[test]
     fn stringifies_block_url() {
-        let etherscan = Client::new_from_env(Chain::Mainnet).unwrap();
+        let etherscan = Client::new(Chain::Mainnet, "").unwrap();
         let block: u64 = 1;
         let block_url: String = etherscan.block_url(block);
         assert_eq!(block_url, format!("https://etherscan.io/block/{block}"));
@@ -464,7 +491,7 @@ mod tests {
 
     #[test]
     fn stringifies_address_url() {
-        let etherscan = Client::new_from_env(Chain::Mainnet).unwrap();
+        let etherscan = Client::new(Chain::Mainnet, "").unwrap();
         let addr: Address = Address::zero();
         let address_url: String = etherscan.address_url(addr);
         assert_eq!(address_url, format!("https://etherscan.io/address/{addr:?}"));
@@ -472,7 +499,7 @@ mod tests {
 
     #[test]
     fn stringifies_transaction_url() {
-        let etherscan = Client::new_from_env(Chain::Mainnet).unwrap();
+        let etherscan = Client::new(Chain::Mainnet, "").unwrap();
         let tx_hash = H256::zero();
         let tx_url: String = etherscan.transaction_url(tx_hash);
         assert_eq!(tx_url, format!("https://etherscan.io/tx/{tx_hash:?}"));
@@ -480,7 +507,7 @@ mod tests {
 
     #[test]
     fn stringifies_token_url() {
-        let etherscan = Client::new_from_env(Chain::Mainnet).unwrap();
+        let etherscan = Client::new(Chain::Mainnet, "").unwrap();
         let token_hash = Address::zero();
         let token_url: String = etherscan.token_url(token_hash);
         assert_eq!(token_url, format!("https://etherscan.io/token/{token_hash:?}"));
@@ -490,24 +517,5 @@ mod tests {
     fn local_networks_not_supported() {
         let err = Client::new_from_env(Chain::Dev).unwrap_err();
         assert!(matches!(err, EtherscanError::LocalNetworksNotSupported));
-    }
-
-    #[tokio::test]
-    async fn check_wrong_etherscan_api_key() {
-        let client = Client::new(Chain::Mainnet, "ABCDEFG").unwrap();
-        let resp = client
-            .contract_source_code("0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse().unwrap())
-            .await
-            .unwrap_err();
-
-        assert!(matches!(resp, EtherscanError::InvalidApiKey));
-    }
-
-    pub async fn run_at_least_duration(duration: Duration, block: impl Future) {
-        let start = SystemTime::now();
-        block.await;
-        if let Some(sleep) = duration.checked_sub(start.elapsed().unwrap()) {
-            tokio::time::sleep(sleep).await;
-        }
     }
 }

@@ -1,4 +1,4 @@
-mod factory;
+pub mod factory;
 use factory::{CreatedFilter, DsProxyFactory, ADDRESS_BOOK};
 
 use super::{Transformer, TransformerError};
@@ -18,8 +18,7 @@ const DS_PROXY_EXECUTE_TARGET: &str =
 const DS_PROXY_EXECUTE_CODE: &str =
     "function execute(bytes memory code, bytes memory data) public payable returns (address target, bytes memory response)";
 
-#[derive(Debug, Clone)]
-/// Represents the DsProxy type that implements the [Transformer](super::Transformer) trait.
+/// Represents the DsProxy type that implements the [Transformer] trait.
 ///
 /// # Example
 ///
@@ -57,6 +56,7 @@ const DS_PROXY_EXECUTE_CODE: &str =
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone, Debug)]
 pub struct DsProxy {
     address: Address,
     contract: BaseContract,
@@ -95,7 +95,7 @@ impl DsProxy {
             Some(addr) => addr,
             None => {
                 let chain_id =
-                    client.get_chainid().await.map_err(ContractError::MiddlewareError)?;
+                    client.get_chainid().await.map_err(ContractError::from_middleware_error)?;
                 match ADDRESS_BOOK.get(&chain_id) {
                     Some(addr) => *addr,
                     None => panic!(
@@ -112,8 +112,7 @@ impl DsProxy {
             .legacy()
             .send()
             .await?
-            .await
-            .map_err(ContractError::ProviderError)?
+            .await?
             .ok_or(ContractError::ContractNotDeployed)?;
 
         // decode the event log to get the address of the deployed contract.

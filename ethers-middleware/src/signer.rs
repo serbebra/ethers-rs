@@ -1,12 +1,10 @@
+use async_trait::async_trait;
 use ethers_core::types::{
     transaction::{eip2718::TypedTransaction, eip2930::AccessListWithGasUsed},
     Address, BlockId, Bytes, Chain, Signature, TransactionRequest, U256,
 };
-use ethers_providers::{maybe, FromErr, Middleware, PendingTransaction};
+use ethers_providers::{maybe, Middleware, MiddlewareError, PendingTransaction};
 use ethers_signers::Signer;
-use std::convert::TryFrom;
-
-use async_trait::async_trait;
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -67,12 +65,6 @@ pub struct SignerMiddleware<M, S> {
     pub(crate) inner: M,
 }
 
-impl<M: Middleware, S: Signer> FromErr<M::Error> for SignerMiddlewareError<M, S> {
-    fn from(src: M::Error) -> SignerMiddlewareError<M, S> {
-        SignerMiddlewareError::MiddlewareError(src)
-    }
-}
-
 #[derive(Error, Debug)]
 /// Error thrown when the client interacts with the blockchain
 pub enum SignerMiddlewareError<M: Middleware, S: Signer> {
@@ -99,6 +91,21 @@ pub enum SignerMiddlewareError<M: Middleware, S: Signer> {
     /// Thrown if the signer's chain_id is different than the chain_id of the transaction
     #[error("specified chain_id is different than the signer's chain_id")]
     DifferentChainID,
+}
+
+impl<M: Middleware, S: Signer> MiddlewareError for SignerMiddlewareError<M, S> {
+    type Inner = M::Error;
+
+    fn from_err(src: M::Error) -> Self {
+        SignerMiddlewareError::MiddlewareError(src)
+    }
+
+    fn as_inner(&self) -> Option<&Self::Inner> {
+        match self {
+            SignerMiddlewareError::MiddlewareError(e) => Some(e),
+            _ => None,
+        }
+    }
 }
 
 // Helper functions for locally signing transactions
@@ -347,7 +354,7 @@ where
     }
 }
 
-#[cfg(all(test, not(feature = "celo"), not(target_arch = "wasm32")))]
+#[cfg(all(test, not(feature = "celo")))]
 mod tests {
     use super::*;
     use ethers_core::{
@@ -490,6 +497,9 @@ mod tests {
                 None,
             )
             .await
+            .unwrap()
+            .await
+            .unwrap()
             .unwrap();
         let client = SignerMiddleware::new_with_provider_chain(provider, key).await.unwrap();
 
@@ -533,7 +543,7 @@ mod tests {
         };
         let mut tx = TypedTransaction::Eip1559(eip1559);
 
-        let chain_id = 10u64; // optimism does not support EIP-1559
+        let chain_id = 324u64; // zksync does not support EIP-1559
 
         // Signer middlewares now rely on a working provider which it can query the chain id from,
         // so we make sure Anvil is started with the chain id that the expected tx was signed

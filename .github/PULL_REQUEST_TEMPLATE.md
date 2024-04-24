@@ -29,4 +29,4 @@ the code change.
 
 -   [ ] Added Tests
 -   [ ] Added Documentation
--   [ ] Updated the changelog
+-   [ ] Breaking changes

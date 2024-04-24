@@ -8,6 +8,7 @@ use ethers_solc::{
     },
     buildinfo::BuildInfo,
     cache::{SolFilesCache, SOLIDITY_FILES_CACHE_FILENAME},
+    error::SolcError,
     info::ContractInfo,
     project_util::*,
     remappings::Remapping,
@@ -40,9 +41,7 @@ fn can_get_versioned_linkrefs() {
         .unwrap();
 
     let project = Project::builder().paths(paths).ephemeral().no_artifacts().build().unwrap();
-
-    let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    project.compile().unwrap().assert_success();
 }
 
 #[test]
@@ -56,7 +55,7 @@ fn can_compile_hardhat_sample() {
     let compiled = project.compile().unwrap();
     assert!(compiled.find_first("Greeter").is_some());
     assert!(compiled.find_first("console").is_some());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     // nothing to compile
     let compiled = project.compile().unwrap();
@@ -80,7 +79,7 @@ fn can_compile_dapp_sample() {
 
     let compiled = project.compile().unwrap();
     assert!(compiled.find_first("Dapp").is_some());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     // nothing to compile
     let compiled = project.compile().unwrap();
@@ -108,7 +107,7 @@ fn can_compile_yul_sample() {
     let compiled = project.compile().unwrap();
     assert!(compiled.find_first("Dapp").is_some());
     assert!(compiled.find_first("SimpleStore").is_some());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     // nothing to compile
     let compiled = project.compile().unwrap();
@@ -181,11 +180,11 @@ fn can_compile_dapp_detect_changes_in_libs() {
     let lib = project
         .add_lib(
             "remapping/Bar",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract Bar {}
-    "#,
+    ",
         )
         .unwrap();
 
@@ -196,7 +195,7 @@ fn can_compile_dapp_detect_changes_in_libs() {
     let compiled = project.compile().unwrap();
     assert!(compiled.find_first("Foo").is_some());
     assert!(compiled.find_first("Bar").is_some());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     // nothing to compile
     let compiled = project.compile().unwrap();
@@ -210,12 +209,12 @@ fn can_compile_dapp_detect_changes_in_libs() {
     project
         .add_lib(
             "remapping/Bar",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     // changed lib
     contract Bar {}
-    "#,
+    ",
         )
         .unwrap();
 
@@ -248,7 +247,7 @@ fn can_compile_dapp_detect_changes_in_sources() {
     let base = project
         .add_source(
             "DssSpell.t.base",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
   contract DssSpellTestBase {
@@ -257,7 +256,7 @@ fn can_compile_dapp_detect_changes_in_sources() {
            deployed_spell = address(0xA867399B43aF7790aC800f2fF3Fa7387dc52Ec5E);
        }
   }
-   "#,
+   ",
         )
         .unwrap();
 
@@ -267,7 +266,7 @@ fn can_compile_dapp_detect_changes_in_sources() {
     assert_eq!(graph.imported_nodes(1).to_vec(), vec![0]);
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("DssSpellTest").is_some());
     assert!(compiled.find_first("DssSpellTestBase").is_some());
 
@@ -286,7 +285,7 @@ fn can_compile_dapp_detect_changes_in_sources() {
     let _ = project
         .add_source(
             "DssSpell.t.base",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
   contract DssSpellTestBase {
@@ -295,7 +294,7 @@ fn can_compile_dapp_detect_changes_in_sources() {
            deployed_spell = address(0);
        }
   }
-   "#,
+   ",
         )
         .unwrap();
     let graph = Graph::resolve(project.paths()).unwrap();
@@ -332,15 +331,15 @@ contract A { }
     project
         .add_source(
             "B",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract B { }
-"#,
+",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let info_dir = project.project().build_info_path();
     assert!(info_dir.exists());
@@ -377,7 +376,7 @@ fn can_compile_dapp_sample_with_cache() {
     let project = Project::builder().paths(paths).build().unwrap();
     let compiled = project.compile().unwrap();
     assert!(compiled.find_first("Dapp").is_some());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     // cache is used when nothing to compile
     let compiled = project.compile().unwrap();
@@ -538,14 +537,14 @@ contract C { }
 
     assert_eq!(
         result,
-        r#"pragma solidity ^0.8.10;
+        r"pragma solidity ^0.8.10;
 
 contract C { }
 
 contract B { }
 
 contract A { }
-"#
+"
     );
 }
 
@@ -594,7 +593,7 @@ contract C { }
 
     assert_eq!(
         result,
-        r#"pragma solidity ^0.8.10;
+        r"pragma solidity ^0.8.10;
 pragma experimental ABIEncoderV2;
 
 contract C { }
@@ -602,7 +601,7 @@ contract C { }
 contract B { }
 
 contract A { }
-"#
+"
     );
 }
 
@@ -620,7 +619,7 @@ fn can_flatten_file_with_duplicates() {
     let result = result.unwrap();
     assert_eq!(
         result,
-        r#"//SPDX-License-Identifier: UNLICENSED
+        r"//SPDX-License-Identifier: UNLICENSED
 pragma solidity >=0.6.0;
 
 contract Bar {}
@@ -628,7 +627,7 @@ contract Bar {}
 contract Foo {}
 
 contract FooBar {}
-"#
+"
     );
 }
 
@@ -647,7 +646,7 @@ fn can_flatten_on_solang_failure() {
     let result = result.unwrap();
     assert_eq!(
         result,
-        r#"// SPDX-License-Identifier: UNLICENSED
+        r"// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.10;
 
 library Lib {}
@@ -656,7 +655,7 @@ library Lib {}
 contract Contract {
     failure();
 }
-"#
+"
     );
 }
 
@@ -682,28 +681,28 @@ contract A { }
     project
         .add_source(
             "Errors",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 error IllegalArgument();
 error IllegalState();
-"#,
+",
         )
         .unwrap();
 
     project
         .add_source(
             "C",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract C { }
-"#,
+",
         )
         .unwrap();
 
     let result = project.flatten(&f).unwrap();
     assert_eq!(
         result,
-        r#"pragma solidity ^0.8.10;
+        r"pragma solidity ^0.8.10;
 
 contract C { }
 
@@ -711,7 +710,7 @@ error IllegalArgument();
 error IllegalState();
 
 contract A { }
-"#
+"
     );
 }
 
@@ -746,16 +745,16 @@ contract B { }
     project
         .add_source(
             "C",
-            r#"pragma solidity ^0.8.10;
+            r"pragma solidity ^0.8.10;
 contract C { }
-"#,
+",
         )
         .unwrap();
 
     let result = project.flatten(&f).unwrap();
     assert_eq!(
         result,
-        r#"pragma solidity ^0.8.10;
+        r"pragma solidity ^0.8.10;
 
 contract C { }
 
@@ -764,7 +763,7 @@ contract C { }
 contract B { }
 
 contract A { }
-"#
+"
     );
 }
 
@@ -810,34 +809,34 @@ contract Contract is Parent,
     project
         .add_source(
             "Parent",
-            r#"pragma solidity ^0.8.10;
+            r"pragma solidity ^0.8.10;
 contract ParentContract { }
-"#,
+",
         )
         .unwrap();
 
     project
         .add_source(
             "AnotherParent",
-            r#"pragma solidity ^0.8.10;
+            r"pragma solidity ^0.8.10;
 contract AnotherParentContract { }
-"#,
+",
         )
         .unwrap();
 
     project
         .add_source(
             "Peer",
-            r#"pragma solidity ^0.8.10;
+            r"pragma solidity ^0.8.10;
 contract PeerContract { }
-"#,
+",
         )
         .unwrap();
 
     project
         .add_source(
             "Math",
-            r#"pragma solidity ^0.8.10;
+            r"pragma solidity ^0.8.10;
 library MathLibrary {
     function minusOne(uint256 val) internal returns (uint256) {
         return val - 1;
@@ -851,16 +850,16 @@ library MathLibrary {
         return type(uint256).max - value;
     }
 }
-"#,
+",
         )
         .unwrap();
 
     project
         .add_source(
             "SomeLib",
-            r#"pragma solidity ^0.8.10;
+            r"pragma solidity ^0.8.10;
 library SomeLib { }
-"#,
+",
         )
         .unwrap();
 
@@ -948,27 +947,27 @@ contract B { }
     project
         .add_source(
             "C",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract C { }
-"#,
+",
         )
         .unwrap();
 
     project
         .add_source(
             "D",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract D { }
-"#,
+",
         )
         .unwrap();
 
     let result = project.flatten(&f).unwrap();
     assert_eq!(
         result,
-        r#"pragma solidity ^0.8.10;
+        r"pragma solidity ^0.8.10;
 
 contract D { }
 
@@ -977,7 +976,7 @@ contract C { }
 contract B { }
 
 contract A { }
-"#
+"
     );
 }
 
@@ -1011,31 +1010,31 @@ fn can_compile_single_files() {
     let f = tmp
         .add_contract(
             "examples/Foo",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract Foo {}
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = tmp.project().compile_file(f.clone()).unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("Foo").is_some());
 
     let bar = tmp
         .add_contract(
             "examples/Bar",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract Bar {}
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = tmp.project().compile_files(vec![f, bar]).unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("Foo").is_some());
     assert!(compiled.find_first("Bar").is_some());
 }
@@ -1046,7 +1045,7 @@ fn consistent_bytecode() {
 
     tmp.add_source(
         "LinkTest",
-        r#"
+        r"
 // SPDX-License-Identifier: MIT
 library LibTest {
     function foobar(uint256 a) public view returns (uint256) {
@@ -1058,12 +1057,12 @@ contract LinkTest {
         return LibTest.foobar(1);
     }
 }
-"#,
+",
     )
     .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let contract = compiled.find_first("LinkTest").unwrap();
     let bytecode = &contract.bytecode.as_ref().unwrap().object;
@@ -1096,19 +1095,19 @@ contract LinkTest {
     let lib = tmp
         .add_source(
             "MyLib",
-            r#"
+            r"
 // SPDX-License-Identifier: MIT
 library MyLib {
     function foobar(uint256 a) public view returns (uint256) {
     	return a * 100;
     }
 }
-"#,
+",
         )
         .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     assert!(compiled.find_first("MyLib").is_some());
     let contract = compiled.find_first("LinkTest").unwrap();
@@ -1123,7 +1122,7 @@ library MyLib {
     .into();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     assert!(compiled.find_first("MyLib").is_some());
     let contract = compiled.find_first("LinkTest").unwrap();
@@ -1135,7 +1134,7 @@ library MyLib {
     tmp.project_mut().solc_config.settings.libraries = libs.with_applied_remappings(tmp.paths());
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     assert!(compiled.find_first("MyLib").is_some());
     let contract = compiled.find_first("LinkTest").unwrap();
@@ -1168,19 +1167,19 @@ contract LinkTest {
 
     tmp.add_lib(
         "remapping/MyLib",
-        r#"
+        r"
 // SPDX-License-Identifier: MIT
 library MyLib {
     function foobar(uint256 a) public view returns (uint256) {
     	return a * 100;
     }
 }
-"#,
+",
     )
     .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     assert!(compiled.find_first("MyLib").is_some());
     let contract = compiled.find_first("LinkTest").unwrap();
@@ -1192,13 +1191,34 @@ library MyLib {
     tmp.project_mut().solc_config.settings.libraries = libs.with_applied_remappings(tmp.paths());
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     assert!(compiled.find_first("MyLib").is_some());
     let contract = compiled.find_first("LinkTest").unwrap();
     let bytecode = &contract.bytecode.as_ref().unwrap().object;
     assert!(!bytecode.is_unlinked());
 }
+
+#[test]
+fn can_detect_invalid_version() {
+    let tmp = TempProject::dapptools().unwrap();
+    let content = r"
+    pragma solidity ^0.100.10;
+    contract A {}
+   ";
+    tmp.add_source("A", content).unwrap();
+
+    let out = tmp.compile().unwrap_err();
+    match out {
+        SolcError::Message(err) => {
+            assert_eq!(err, "Encountered invalid solc version in src/A.sol: No solc version exists that matches the version requirement: ^0.100.10");
+        }
+        _ => {
+            unreachable!()
+        }
+    }
+}
+
 #[test]
 fn can_recompile_with_changes() {
     let mut tmp = TempProject::dapptools().unwrap();
@@ -1213,15 +1233,15 @@ fn can_recompile_with_changes() {
 
     tmp.add_contract(
         "modules/B",
-        r#"
+        r"
     pragma solidity ^0.8.10;
     contract B {}
-   "#,
+   ",
     )
     .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("A").is_some());
     assert!(compiled.find_first("B").is_some());
 
@@ -1233,7 +1253,7 @@ fn can_recompile_with_changes() {
     // modify A.sol
     tmp.add_source("A", format!("{content}\n")).unwrap();
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
     assert!(compiled.find_first("A").is_some());
     assert!(compiled.find_first("B").is_some());
@@ -1245,10 +1265,10 @@ fn can_recompile_with_lowercase_names() {
 
     tmp.add_source(
         "deployProxy.sol",
-        r#"
+        r"
     pragma solidity =0.8.12;
     contract DeployProxy {}
-   "#,
+   ",
     )
     .unwrap();
 
@@ -1262,15 +1282,15 @@ fn can_recompile_with_lowercase_names() {
 
     tmp.add_source(
         "ProxyAdmin.sol",
-        r#"
+        r"
     pragma solidity =0.8.12;
     contract ProxyAdmin {}
-   "#,
+   ",
     )
     .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("DeployProxy").is_some());
     assert!(compiled.find_first("UpgradeProxy").is_some());
     assert!(compiled.find_first("ProxyAdmin").is_some());
@@ -1288,7 +1308,7 @@ fn can_recompile_with_lowercase_names() {
     // modify upgradeProxy.sol
     tmp.add_source("upgradeProxy.sol", format!("{upgrade}\n")).unwrap();
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
     assert!(compiled.find_first("DeployProxy").is_some());
     assert!(compiled.find_first("UpgradeProxy").is_some());
@@ -1322,14 +1342,14 @@ fn can_recompile_unchanged_with_empty_files() {
     )
     .unwrap();
 
-    let c = r#"
+    let c = r"
     pragma solidity ^0.8.10;
     contract C {}
-   "#;
+   ";
     tmp.add_source("C", c).unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("A").is_some());
     assert!(compiled.find_first("C").is_some());
 
@@ -1341,7 +1361,7 @@ fn can_recompile_unchanged_with_empty_files() {
     // modify C.sol
     tmp.add_source("C", format!("{c}\n")).unwrap();
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
     assert!(compiled.find_first("A").is_some());
     assert!(compiled.find_first("C").is_some());
@@ -1354,9 +1374,9 @@ fn can_emit_empty_artifacts() {
     let top_level = tmp
         .add_source(
             "top_level",
-            r#"
+            r"
     function test() {}
-   "#,
+   ",
         )
         .unwrap();
 
@@ -1378,7 +1398,7 @@ contract Contract {
     .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("Contract").is_some());
     assert!(compiled.find_first("top_level").is_some());
     let mut artifacts = tmp.artifacts_snapshot().unwrap();
@@ -1401,10 +1421,10 @@ contract Contract {
 
     tmp.add_source(
         "top_level",
-        r#"
+        r"
     error MyError();
     function test() {}
-   "#,
+   ",
     )
     .unwrap();
     let compiled = tmp.compile().unwrap();
@@ -1418,66 +1438,66 @@ fn can_detect_contract_def_source_files() {
     let mylib = tmp
         .add_source(
             "MyLib",
-            r#"
+            r"
         pragma solidity 0.8.10;
         library MyLib {
         }
-   "#,
+   ",
         )
         .unwrap();
 
     let myinterface = tmp
         .add_source(
             "MyInterface",
-            r#"
+            r"
         pragma solidity 0.8.10;
         interface MyInterface {}
-   "#,
+   ",
         )
         .unwrap();
 
     let mycontract = tmp
         .add_source(
             "MyContract",
-            r#"
+            r"
         pragma solidity 0.8.10;
         contract MyContract {}
-   "#,
+   ",
         )
         .unwrap();
 
     let myabstract_contract = tmp
         .add_source(
             "MyAbstractContract",
-            r#"
+            r"
         pragma solidity 0.8.10;
         contract MyAbstractContract {}
-   "#,
+   ",
         )
         .unwrap();
 
     let myerr = tmp
         .add_source(
             "MyError",
-            r#"
+            r"
         pragma solidity 0.8.10;
        error MyError();
-   "#,
+   ",
         )
         .unwrap();
 
     let myfunc = tmp
         .add_source(
             "MyFunction",
-            r#"
+            r"
         pragma solidity 0.8.10;
         function abc(){}
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let mut sources = compiled.output().sources;
     let myfunc = sources.remove_by_path(myfunc.to_string_lossy()).unwrap();
@@ -1521,17 +1541,17 @@ fn can_compile_sparse_with_link_references() {
     let my_lib_path = tmp
         .add_source(
             "mylib.sol",
-            r#"
+            r"
     pragma solidity =0.8.12;
     library MyLib {
        function doStuff() external pure returns (uint256) {return 1337;}
     }
-   "#,
+   ",
         )
         .unwrap();
 
     let mut compiled = tmp.compile_sparse(TestFileFilter::default()).unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let mut output = compiled.clone().output();
 
@@ -1568,15 +1588,15 @@ fn can_sanitize_bytecode_hash() {
 
     tmp.add_source(
         "A",
-        r#"
+        r"
     pragma solidity =0.5.17;
     contract A {}
-   "#,
+   ",
     )
     .unwrap();
 
     let compiled = tmp.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("A").is_some());
 }
 
@@ -1606,15 +1626,14 @@ fn can_compile_model_checker_sample() {
 
     let mut project = TempProject::<ConfigurableArtifacts>::new(paths).unwrap();
     project.project_mut().solc_config.settings.model_checker = Some(ModelCheckerSettings {
-        contracts: BTreeMap::new(),
         engine: Some(CHC),
-        targets: None,
         timeout: Some(10000),
+        ..Default::default()
     });
     let compiled = project.compile().unwrap();
 
     assert!(compiled.find_first("Assert").is_some());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.has_compiler_warnings());
 }
 
@@ -1635,7 +1654,7 @@ fn test_compiler_severity_filter() {
         .unwrap();
     let compiled = project.compile().unwrap();
     assert!(compiled.has_compiler_warnings());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let project = Project::builder()
         .no_artifacts()
@@ -1678,7 +1697,7 @@ fn test_compiler_severity_filter_and_ignored_error_codes() {
         .unwrap();
     let compiled = project.compile().unwrap();
     assert!(!compiled.has_compiler_warnings());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let project = Project::builder()
         .no_artifacts()
@@ -1690,7 +1709,7 @@ fn test_compiler_severity_filter_and_ignored_error_codes() {
         .unwrap();
     let compiled = project.compile().unwrap();
     assert!(!compiled.has_compiler_warnings());
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 }
 
 fn remove_solc_if_exists(version: &Version) {
@@ -1709,10 +1728,9 @@ async fn can_install_solc_and_compile_version() {
             "Contract",
             format!(
                 r#"
-pragma solidity {};
+pragma solidity {version};
 contract Contract {{ }}
-"#,
-                version
+"#
             ),
         )
         .unwrap();
@@ -1720,7 +1738,7 @@ contract Contract {{ }}
     remove_solc_if_exists(&version);
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1749,26 +1767,26 @@ fn can_purge_obsolete_artifacts() {
     project
         .add_source(
             "Contract",
-            r#"
+            r"
     pragma solidity >=0.8.10;
 
    contract Contract {
         function xyz() public {
         }
    }
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
     assert_eq!(compiled.into_artifacts().count(), 1);
 
     project.set_solc("0.8.13");
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
     assert_eq!(compiled.into_artifacts().count(), 1);
 }
@@ -1779,7 +1797,7 @@ fn can_parse_notice() {
     project.project_mut().artifacts.additional_values.userdoc = true;
     project.project_mut().solc_config.settings = project.project_mut().artifacts.settings();
 
-    let contract = r#"
+    let contract = r"
     pragma solidity $VERSION;
 
    contract Contract {
@@ -1802,11 +1820,11 @@ fn can_parse_notice() {
         function abc() public {
         }
    }
-   "#;
+   ";
     project.add_source("Contract", contract.replace("$VERSION", "=0.5.17")).unwrap();
 
     let mut compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
     assert!(compiled.find_first("Contract").is_some());
     let userdoc = compiled.remove_first("Contract").unwrap().userdoc;
@@ -1830,7 +1848,7 @@ fn can_parse_notice() {
     project.add_source("Contract", contract.replace("$VERSION", "^0.8.10")).unwrap();
 
     let mut compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
     assert!(compiled.find_first("Contract").is_some());
     let userdoc = compiled.remove_first("Contract").unwrap().userdoc;
@@ -1859,9 +1877,9 @@ fn can_parse_doc() {
     project.project_mut().artifacts.additional_values.devdoc = true;
     project.project_mut().solc_config.settings = project.project_mut().artifacts.settings();
 
-    let contract = r#"
+    let contract = r"
 // SPDX-License-Identifier: GPL-3.0-only
-pragma solidity ^0.8.0;
+pragma solidity 0.8.17;
 
 /// @title Not an ERC20.
 /// @author Notadev
@@ -1896,11 +1914,11 @@ contract NotERC20 is INotERC20 {
         return false;
     }
 }
-    "#;
+    ";
     project.add_source("Contract", contract).unwrap();
 
     let mut compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
 
     assert!(compiled.find_first("INotERC20").is_some());
@@ -2042,42 +2060,42 @@ fn test_relative_cache_entries() {
     let _a = project
         .add_source(
             "A",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract A { }
-"#,
+",
         )
         .unwrap();
     let _b = project
         .add_source(
             "B",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract B { }
-"#,
+",
         )
         .unwrap();
     let _c = project
         .add_source(
             "C",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract C { }
-"#,
+",
         )
         .unwrap();
     let _d = project
         .add_source(
             "D",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract D { }
-"#,
+",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let cache = SolFilesCache::read(project.cache_path()).unwrap();
 
@@ -2125,15 +2143,15 @@ contract B { }
     let c = project
         .add_source(
             "C",
-            r#"
+            r"
 pragma solidity ^0.8.10;
 contract C { }
-"#,
+",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     fs::remove_file(c).unwrap();
     let compiled = project.compile().unwrap();
@@ -2147,27 +2165,27 @@ fn can_handle_conflicting_files() {
     project
         .add_source(
             "Greeter",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract Greeter {}
-   "#,
+   ",
         )
         .unwrap();
 
     project
         .add_source(
             "tokens/Greeter",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract Greeter {}
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let artifacts = compiled.artifacts().count();
     assert_eq!(artifacts, 2);
@@ -2212,31 +2230,31 @@ fn can_handle_conflicting_files_recompile() {
     project
         .add_source(
             "A",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract A {
             function foo() public{}
     }
-   "#,
+   ",
         )
         .unwrap();
 
     project
         .add_source(
             "inner/A",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract A {
             function bar() public{}
     }
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let artifacts = compiled.artifacts().count();
     assert_eq!(artifacts, 2);
@@ -2269,18 +2287,18 @@ fn can_handle_conflicting_files_recompile() {
     project
         .add_source(
             "inner/A",
-            r#"
+            r"
     pragma solidity ^0.8.10;
     contract A {
     function bar() public{}
     function baz() public{}
     }
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let mut recompiled_artifacts =
         project.artifacts_snapshot().unwrap().artifacts.into_stripped_file_prefixes(project.root());
@@ -2309,31 +2327,31 @@ fn can_handle_conflicting_files_case_sensitive_recompile() {
     project
         .add_source(
             "a",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract A {
             function foo() public{}
     }
-   "#,
+   ",
         )
         .unwrap();
 
     project
         .add_source(
             "inner/A",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract A {
             function bar() public{}
     }
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let artifacts = compiled.artifacts().count();
     assert_eq!(artifacts, 2);
@@ -2366,18 +2384,18 @@ fn can_handle_conflicting_files_case_sensitive_recompile() {
     project
         .add_source(
             "inner/A",
-            r#"
+            r"
     pragma solidity ^0.8.10;
     contract A {
     function bar() public{}
     function baz() public{}
     }
-   "#,
+   ",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let mut recompiled_artifacts =
         project.artifacts_snapshot().unwrap().artifacts.into_stripped_file_prefixes(project.root());
@@ -2403,7 +2421,7 @@ fn can_checkout_repo() {
     let project = TempProject::checkout("transmissions11/solmate").unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     let _artifacts = project.artifacts_snapshot().unwrap();
 }
 
@@ -2431,16 +2449,16 @@ fn can_detect_config_changes() {
     project
         .add_lib(
             "remapping/Bar",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     contract Bar {}
-    "#,
+    ",
         )
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
 
     let cache = SolFilesCache::read(&project.paths().cache).unwrap();
     assert_eq!(cache.files.len(), 2);
@@ -2452,7 +2470,7 @@ fn can_detect_config_changes() {
     project.project_mut().solc_config.settings.optimizer.enabled = Some(true);
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(!compiled.is_unchanged());
 }
 
@@ -2476,7 +2494,7 @@ fn can_add_basic_contract_and_library() {
     assert!(graph.files().contains_key(&lib));
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("Foo").is_some());
     assert!(compiled.find_first("Bar").is_some());
 }
@@ -2495,11 +2513,11 @@ fn can_handle_nested_absolute_imports() {
     project
         .add_lib(
             "myDepdendency/src/interfaces/IConfig.sol",
-            r#"
+            r"
     pragma solidity ^0.8.10;
 
     interface IConfig {}
-   "#,
+   ",
         )
         .unwrap();
 
@@ -2528,7 +2546,7 @@ fn can_handle_nested_absolute_imports() {
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("Greeter").is_some());
     assert!(compiled.find_first("Config").is_some());
     assert!(compiled.find_first("IConfig").is_some());
@@ -2541,7 +2559,7 @@ fn can_handle_nested_test_absolute_imports() {
     project
         .add_source(
             "Contract.sol",
-            r#"
+            r"
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity =0.8.13;
 
@@ -2558,7 +2576,7 @@ contract Contract {
         c = Library.f(1, 2);
     }
 }
-   "#,
+   ",
         )
         .unwrap();
 
@@ -2584,6 +2602,6 @@ contract ContractTest {
         .unwrap();
 
     let compiled = project.compile().unwrap();
-    assert!(!compiled.has_compiler_errors());
+    compiled.assert_success();
     assert!(compiled.find_first("Contract").is_some());
 }

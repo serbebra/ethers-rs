@@ -4,16 +4,18 @@ use crate::{
 };
 use ethers_core::abi::Abi;
 use md5::Digest;
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, HashSet},
     fmt, fs,
+    ops::Range,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
 };
 use tracing::warn;
-use yansi::Paint;
+use yansi::{Color, Paint, Style};
 
 pub mod ast;
 pub use ast::*;
@@ -99,49 +101,13 @@ impl CompilerInput {
 
     /// This will remove/adjust values in the `CompilerInput` that are not compatible with this
     /// version
+    pub fn sanitize(&mut self, version: &Version) {
+        self.settings.sanitize(version)
+    }
+
+    /// Consumes the type and returns a [CompilerInput::sanitized] version
     pub fn sanitized(mut self, version: &Version) -> Self {
-        static PRE_V0_6_0: once_cell::sync::Lazy<VersionReq> =
-            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.6.0").unwrap());
-        static PRE_V0_8_10: once_cell::sync::Lazy<VersionReq> =
-            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.10").unwrap());
-        static PRE_V0_7_5: once_cell::sync::Lazy<VersionReq> =
-            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.7.5").unwrap());
-        static PRE_V0_8_18: once_cell::sync::Lazy<VersionReq> =
-            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.18").unwrap());
-
-        if PRE_V0_6_0.matches(version) {
-            if let Some(ref mut meta) = self.settings.metadata {
-                // introduced in <https://docs.soliditylang.org/en/v0.6.0/using-the-compiler.html#compiler-api>
-                // missing in <https://docs.soliditylang.org/en/v0.5.17/using-the-compiler.html#compiler-api>
-                meta.bytecode_hash.take();
-            }
-            // introduced in <https://docs.soliditylang.org/en/v0.6.0/using-the-compiler.html#compiler-api>
-            let _ = self.settings.debug.take();
-        }
-
-        if PRE_V0_8_10.matches(version) {
-            if let Some(ref mut debug) = self.settings.debug {
-                // introduced in <https://docs.soliditylang.org/en/v0.8.10/using-the-compiler.html#compiler-api>
-                // <https://github.com/ethereum/solidity/releases/tag/v0.8.10>
-                debug.debug_info.clear();
-            }
-
-            // 0.8.10 is the earliest version that has all model checker options.
-            self.settings.model_checker = None;
-        }
-
-        if PRE_V0_7_5.matches(version) {
-            // introduced in 0.7.5 <https://github.com/ethereum/solidity/releases/tag/v0.7.5>
-            self.settings.via_ir.take();
-        }
-
-        if PRE_V0_8_18.matches(version) {
-            // introduced in 0.8.18 <https://github.com/ethereum/solidity/releases/tag/v0.8.18>
-            if let Some(ref mut meta) = self.settings.metadata {
-                meta.cbor_metadata = None;
-            }
-        }
-
+        self.settings.sanitize(version);
         self
     }
 
@@ -182,7 +148,7 @@ impl CompilerInput {
     /// supported by the provided compiler version.
     #[must_use]
     pub fn normalize_evm_version(mut self, version: &Version) -> Self {
-        if let Some(ref mut evm_version) = self.settings.evm_version {
+        if let Some(evm_version) = &mut self.settings.evm_version {
             self.settings.evm_version = evm_version.normalize_version(version);
         }
         self
@@ -259,7 +225,7 @@ impl StandardJsonCompilerInput {
     /// supported by the provided compiler version.
     #[must_use]
     pub fn normalize_evm_version(mut self, version: &Version) -> Self {
-        if let Some(ref mut evm_version) = self.settings.evm_version {
+        if let Some(evm_version) = &mut self.settings.evm_version {
             self.settings.evm_version = evm_version.normalize_version(version);
         }
         self
@@ -329,6 +295,77 @@ impl Settings {
     /// Creates a new `Settings` instance with the given `output_selection`
     pub fn new(output_selection: impl Into<OutputSelection>) -> Self {
         Self { output_selection: output_selection.into(), ..Default::default() }
+    }
+
+    /// Consumes the type and returns a [Settings::sanitize] version
+    pub fn sanitized(mut self, version: &Version) -> Self {
+        self.sanitize(version);
+        self
+    }
+
+    /// This will remove/adjust values in the settings that are not compatible with this version.
+    pub fn sanitize(&mut self, version: &Version) {
+        const V0_6_0: Version = Version::new(0, 6, 0);
+        if *version < V0_6_0 {
+            if let Some(meta) = &mut self.metadata {
+                // introduced in <https://docs.soliditylang.org/en/v0.6.0/using-the-compiler.html#compiler-api>
+                // missing in <https://docs.soliditylang.org/en/v0.5.17/using-the-compiler.html#compiler-api>
+                meta.bytecode_hash = None;
+            }
+            // introduced in <https://docs.soliditylang.org/en/v0.6.0/using-the-compiler.html#compiler-api>
+            self.debug = None;
+        }
+
+        const V0_7_5: Version = Version::new(0, 7, 5);
+        if *version < V0_7_5 {
+            // introduced in 0.7.5 <https://github.com/ethereum/solidity/releases/tag/v0.7.5>
+            self.via_ir = None;
+        }
+
+        const V0_8_7: Version = Version::new(0, 8, 7);
+        if *version < V0_8_7 {
+            // lower the disable version from 0.8.10 to 0.8.7, due to `divModNoSlacks`,
+            // `showUnproved` and `solvers` are implemented
+            // introduced in <https://github.com/ethereum/solidity/releases/tag/v0.8.7>
+            self.model_checker = None;
+        }
+
+        const V0_8_10: Version = Version::new(0, 8, 10);
+        if *version < V0_8_10 {
+            if let Some(debug) = &mut self.debug {
+                // introduced in <https://docs.soliditylang.org/en/v0.8.10/using-the-compiler.html#compiler-api>
+                // <https://github.com/ethereum/solidity/releases/tag/v0.8.10>
+                debug.debug_info.clear();
+            }
+
+            if let Some(model_checker) = &mut self.model_checker {
+                // introduced in <https://github.com/ethereum/solidity/releases/tag/v0.8.10>
+                model_checker.invariants = None;
+            }
+        }
+
+        const V0_8_18: Version = Version::new(0, 8, 18);
+        if *version < V0_8_18 {
+            // introduced in 0.8.18 <https://github.com/ethereum/solidity/releases/tag/v0.8.18>
+            if let Some(meta) = &mut self.metadata {
+                meta.cbor_metadata = None;
+            }
+
+            if let Some(model_checker) = &mut self.model_checker {
+                if let Some(solvers) = &mut model_checker.solvers {
+                    // elf solver introduced in 0.8.18 <https://github.com/ethereum/solidity/releases/tag/v0.8.18>
+                    solvers.retain(|solver| *solver != ModelCheckerSolver::Eld);
+                }
+            }
+        }
+
+        if *version < SHANGHAI_SOLC {
+            // introduced in 0.8.20 <https://github.com/ethereum/solidity/releases/tag/v0.8.20>
+            if let Some(model_checker) = &mut self.model_checker {
+                model_checker.show_proved_safe = None;
+                model_checker.show_unsupported = None;
+            }
+        }
     }
 
     /// Inserts a set of `ContractOutputSelection`
@@ -414,6 +451,34 @@ impl Settings {
     #[must_use]
     pub fn with_via_ir(self) -> Self {
         self.set_via_ir(true)
+    }
+
+    /// Enable `viaIR` and use the minimum optimization settings
+    ///
+    /// This is useful in the following scenarios:
+    /// - When compiling for test coverage, this can resolve the "stack too deep" error while still
+    ///   giving a relatively accurate source mapping
+    /// - When compiling for test, this can reduce the compilation time
+    pub fn with_via_ir_minimum_optimization(mut self) -> Self {
+        // https://github.com/foundry-rs/foundry/pull/5349
+        // https://github.com/ethereum/solidity/issues/12533#issuecomment-1013073350
+        self.via_ir = Some(true);
+        self.optimizer.details = Some(OptimizerDetails {
+            peephole: Some(false),
+            inliner: Some(false),
+            jumpdest_remover: Some(false),
+            order_literals: Some(false),
+            deduplicate: Some(false),
+            cse: Some(false),
+            constant_optimizer: Some(false),
+            yul: Some(true), // enable yul optimizer
+            yul_details: Some(YulDetails {
+                stack_allocation: Some(true),
+                // with only unused prunner step
+                optimizer_steps: Some("u".to_string()),
+            }),
+        });
+        self
     }
 
     /// Adds `ast` to output
@@ -532,8 +597,7 @@ impl Libraries {
                 .ok_or_else(|| SolcError::msg(format!("failed to parse library address: {lib}")))?;
             if items.next().is_some() {
                 return Err(SolcError::msg(format!(
-                    "failed to parse, too many arguments passed: {}",
-                    lib
+                    "failed to parse, too many arguments passed: {lib}"
                 )))
             }
             libraries
@@ -662,6 +726,23 @@ pub struct OptimizerDetails {
     pub yul_details: Option<YulDetails>,
 }
 
+// === impl OptimizerDetails ===
+
+impl OptimizerDetails {
+    /// Returns true if no settings are set.
+    pub fn is_empty(&self) -> bool {
+        self.peephole.is_none() &&
+            self.inliner.is_none() &&
+            self.jumpdest_remover.is_none() &&
+            self.order_literals.is_none() &&
+            self.deduplicate.is_none() &&
+            self.cse.is_none() &&
+            self.constant_optimizer.is_none() &&
+            self.yul.is_none() &&
+            self.yul_details.as_ref().map(|yul| yul.is_empty()).unwrap_or(true)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct YulDetails {
@@ -675,7 +756,19 @@ pub struct YulDetails {
     pub optimizer_steps: Option<String>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+// === impl YulDetails ===
+
+impl YulDetails {
+    /// Returns true if no settings are set.
+    pub fn is_empty(&self) -> bool {
+        self.stack_allocation.is_none() && self.optimizer_steps.is_none()
+    }
+}
+
+/// EVM versions.
+///
+/// Kept in sync with: <https://github.com/ethereum/solidity/blob/develop/liblangutil/EVMVersion.h>
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EvmVersion {
     Homestead,
     TangerineWhistle,
@@ -686,56 +779,105 @@ pub enum EvmVersion {
     Istanbul,
     Berlin,
     London,
-}
-
-impl Default for EvmVersion {
-    fn default() -> Self {
-        Self::London
-    }
+    Paris,
+    #[default]
+    Shanghai,
 }
 
 impl EvmVersion {
-    /// Checks against the given solidity `semver::Version`
-    pub fn normalize_version(self, version: &Version) -> Option<EvmVersion> {
-        // the EVM version flag was only added at 0.4.21
-        // we work our way backwards
-        if version >= &CONSTANTINOPLE_SOLC {
-            // If the Solc is at least at london, it supports all EVM versions
-            Some(if version >= &LONDON_SOLC {
+    /// Normalizes this EVM version by checking against the given Solc [`Version`].
+    pub fn normalize_version(self, version: &Version) -> Option<Self> {
+        // The EVM version flag was only added in 0.4.21; we work our way backwards
+        if *version >= BYZANTIUM_SOLC {
+            // If the Solc version is at least at Shanghai, it supports all EVM versions.
+            // For all other cases, cap at the at-the-time highest possible fork.
+            let normalized = if *version >= SHANGHAI_SOLC {
                 self
-                // For all other cases, cap at the at-the-time highest possible
-                // fork
-            } else if version >= &BERLIN_SOLC && self >= EvmVersion::Berlin {
-                EvmVersion::Berlin
-            } else if version >= &ISTANBUL_SOLC && self >= EvmVersion::Istanbul {
-                EvmVersion::Istanbul
-            } else if version >= &PETERSBURG_SOLC && self >= EvmVersion::Petersburg {
-                EvmVersion::Petersburg
-            } else if self >= EvmVersion::Constantinople {
-                EvmVersion::Constantinople
+            } else if self >= Self::Paris && *version >= PARIS_SOLC {
+                Self::Paris
+            } else if self >= Self::London && *version >= LONDON_SOLC {
+                Self::London
+            } else if self >= Self::Berlin && *version >= BERLIN_SOLC {
+                Self::Berlin
+            } else if self >= Self::Istanbul && *version >= ISTANBUL_SOLC {
+                Self::Istanbul
+            } else if self >= Self::Petersburg && *version >= PETERSBURG_SOLC {
+                Self::Petersburg
+            } else if self >= Self::Constantinople && *version >= CONSTANTINOPLE_SOLC {
+                Self::Constantinople
+            } else if self >= Self::Byzantium {
+                Self::Byzantium
             } else {
                 self
-            })
+            };
+            Some(normalized)
         } else {
             None
         }
+    }
+
+    /// Returns the EVM version as a string.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Homestead => "homestead",
+            Self::TangerineWhistle => "tangerineWhistle",
+            Self::SpuriousDragon => "spuriousDragon",
+            Self::Byzantium => "byzantium",
+            Self::Constantinople => "constantinople",
+            Self::Petersburg => "petersburg",
+            Self::Istanbul => "istanbul",
+            Self::Berlin => "berlin",
+            Self::London => "london",
+            Self::Paris => "paris",
+            Self::Shanghai => "shanghai",
+        }
+    }
+
+    /// Has the `RETURNDATACOPY` and `RETURNDATASIZE` opcodes.
+    pub fn supports_returndata(&self) -> bool {
+        *self >= Self::Byzantium
+    }
+
+    pub fn has_static_call(&self) -> bool {
+        *self >= Self::Byzantium
+    }
+
+    pub fn has_bitwise_shifting(&self) -> bool {
+        *self >= Self::Constantinople
+    }
+
+    pub fn has_create2(&self) -> bool {
+        *self >= Self::Constantinople
+    }
+
+    pub fn has_ext_code_hash(&self) -> bool {
+        *self >= Self::Constantinople
+    }
+
+    pub fn has_chain_id(&self) -> bool {
+        *self >= Self::Istanbul
+    }
+
+    pub fn has_self_balance(&self) -> bool {
+        *self >= Self::Istanbul
+    }
+
+    pub fn has_base_fee(&self) -> bool {
+        *self >= Self::London
+    }
+
+    pub fn has_prevrandao(&self) -> bool {
+        *self >= Self::Paris
+    }
+
+    pub fn has_push0(&self) -> bool {
+        *self >= Self::Shanghai
     }
 }
 
 impl fmt::Display for EvmVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let string = match self {
-            EvmVersion::Homestead => "homestead",
-            EvmVersion::TangerineWhistle => "tangerineWhistle",
-            EvmVersion::SpuriousDragon => "spuriousDragon",
-            EvmVersion::Constantinople => "constantinople",
-            EvmVersion::Petersburg => "petersburg",
-            EvmVersion::Istanbul => "istanbul",
-            EvmVersion::Berlin => "berlin",
-            EvmVersion::London => "london",
-            EvmVersion::Byzantium => "byzantium",
-        };
-        write!(f, "{string}")
+        f.write_str(self.as_str())
     }
 }
 
@@ -744,15 +886,17 @@ impl FromStr for EvmVersion {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "homestead" => Ok(EvmVersion::Homestead),
-            "tangerineWhistle" => Ok(EvmVersion::TangerineWhistle),
-            "spuriousDragon" => Ok(EvmVersion::SpuriousDragon),
-            "constantinople" => Ok(EvmVersion::Constantinople),
-            "petersburg" => Ok(EvmVersion::Petersburg),
-            "istanbul" => Ok(EvmVersion::Istanbul),
-            "berlin" => Ok(EvmVersion::Berlin),
-            "london" => Ok(EvmVersion::London),
-            "byzantium" => Ok(EvmVersion::Byzantium),
+            "homestead" => Ok(Self::Homestead),
+            "tangerineWhistle" => Ok(Self::TangerineWhistle),
+            "spuriousDragon" => Ok(Self::SpuriousDragon),
+            "byzantium" => Ok(Self::Byzantium),
+            "constantinople" => Ok(Self::Constantinople),
+            "petersburg" => Ok(Self::Petersburg),
+            "istanbul" => Ok(Self::Istanbul),
+            "berlin" => Ok(Self::Berlin),
+            "london" => Ok(Self::London),
+            "paris" => Ok(Self::Paris),
+            "shanghai" => Ok(Self::Shanghai),
             s => Err(format!("Unknown evm version: {s}")),
         }
     }
@@ -784,9 +928,10 @@ pub struct DebuggingSettings {
 }
 
 /// How to treat revert (and require) reason strings.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RevertStrings {
     /// "default" does not inject compiler-generated revert strings and keeps user-supplied ones.
+    #[default]
     Default,
     /// "strip" removes all revert strings (if possible, i.e. if literals are used) keeping
     /// side-effects
@@ -825,12 +970,6 @@ impl FromStr for RevertStrings {
     }
 }
 
-impl Default for RevertStrings {
-    fn default() -> Self {
-        RevertStrings::Default
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsMetadata {
     /// Use only literal content and not URLs (false by default)
@@ -866,17 +1005,12 @@ impl From<BytecodeHash> for SettingsMetadata {
 /// Determines the hash method for the metadata hash that is appended to the bytecode.
 ///
 /// Solc's default is `Ipfs`, see <https://docs.soliditylang.org/en/latest/using-the-compiler.html#compiler-api>.
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BytecodeHash {
+    #[default]
     Ipfs,
     None,
     Bzzr1,
-}
-
-impl Default for BytecodeHash {
-    fn default() -> Self {
-        BytecodeHash::Ipfs
-    }
 }
 
 impl FromStr for BytecodeHash {
@@ -1017,7 +1151,8 @@ pub struct MetadataSource {
 }
 
 /// Model checker settings for solc
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelCheckerSettings {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub contracts: BTreeMap<String, Vec<String>>,
@@ -1031,11 +1166,24 @@ pub struct ModelCheckerSettings {
     pub timeout: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub targets: Option<Vec<ModelCheckerTarget>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invariants: Option<Vec<ModelCheckerInvariant>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_unproved: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub div_mod_with_slacks: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solvers: Option<Vec<ModelCheckerSolver>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_unsupported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_proved_safe: Option<bool>,
 }
 
 /// Which model checker engine to run.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelCheckerEngine {
+    #[default]
     Default,
     All,
     BMC,
@@ -1065,12 +1213,6 @@ impl FromStr for ModelCheckerEngine {
             "chc" => Ok(ModelCheckerEngine::CHC),
             s => Err(format!("Unknown model checker engine: {s}")),
         }
-    }
-}
-
-impl Default for ModelCheckerEngine {
-    fn default() -> Self {
-        ModelCheckerEngine::Default
     }
 }
 
@@ -1118,6 +1260,72 @@ impl FromStr for ModelCheckerTarget {
             "outOfBounds" => Ok(ModelCheckerTarget::OutOfBounds),
             "balance" => Ok(ModelCheckerTarget::Balance),
             s => Err(format!("Unknown model checker target: {s}")),
+        }
+    }
+}
+
+/// Which model checker invariants to check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelCheckerInvariant {
+    Contract,
+    Reentrancy,
+}
+
+impl fmt::Display for ModelCheckerInvariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let string = match self {
+            ModelCheckerInvariant::Contract => "contract",
+            ModelCheckerInvariant::Reentrancy => "reentrancy",
+        };
+        write!(f, "{string}")
+    }
+}
+
+impl FromStr for ModelCheckerInvariant {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "contract" => Ok(ModelCheckerInvariant::Contract),
+            "reentrancy" => Ok(ModelCheckerInvariant::Reentrancy),
+            s => Err(format!("Unknown model checker invariant: {s}")),
+        }
+    }
+}
+
+/// Which model checker solvers to check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelCheckerSolver {
+    Cvc4,
+    Eld,
+    Smtlib2,
+    Z3,
+}
+
+impl fmt::Display for ModelCheckerSolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let string = match self {
+            ModelCheckerSolver::Cvc4 => "cvc4",
+            ModelCheckerSolver::Eld => "eld",
+            ModelCheckerSolver::Smtlib2 => "smtlib2",
+            ModelCheckerSolver::Z3 => "z3",
+        };
+        write!(f, "{string}")
+    }
+}
+
+impl FromStr for ModelCheckerSolver {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "cvc4" => Ok(ModelCheckerSolver::Cvc4),
+            "eld" => Ok(ModelCheckerSolver::Cvc4),
+            "smtlib2" => Ok(ModelCheckerSolver::Smtlib2),
+            "z3" => Ok(ModelCheckerSolver::Z3),
+            s => Err(format!("Unknown model checker invariant: {s}")),
         }
     }
 }
@@ -1181,16 +1389,29 @@ pub struct DocLibraries {
     pub libs: BTreeMap<String, serde_json::Value>,
 }
 
+/// Content of a solidity file
+///
+/// This contains the actual source code of a file
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Source {
-    pub content: String,
+    /// Content of the file
+    ///
+    /// This is an `Arc` because it may be cloned. If the [Graph](crate::resolver::Graph) of the
+    /// project contains multiple conflicting versions then the same [Source] may be required by
+    /// conflicting versions and needs to be duplicated.
+    pub content: Arc<String>,
 }
 
 impl Source {
-    /// Reads the file content
+    /// Creates a new instance of [Source] with the given content.
+    pub fn new(content: impl Into<String>) -> Self {
+        Self { content: Arc::new(content.into()) }
+    }
+
+    /// Reads the file's content
     pub fn read(file: impl AsRef<Path>) -> Result<Self, SolcIoError> {
         let file = file.as_ref();
-        Ok(Self { content: fs::read_to_string(file).map_err(|err| SolcIoError::new(err, file))? })
+        Ok(Self::new(fs::read_to_string(file).map_err(|err| SolcIoError::new(err, file))?))
     }
 
     /// Recursively finds all source files under the given dir path and reads them all
@@ -1240,7 +1461,7 @@ impl Source {
     /// Generate a non-cryptographically secure checksum of the file's content
     pub fn content_hash(&self) -> String {
         let mut hasher = md5::Md5::new();
-        hasher.update(&self.content);
+        hasher.update(self);
         let result = hasher.finalize();
         hex::encode(result)
     }
@@ -1256,11 +1477,9 @@ impl Source {
     /// async version of `Self::read`
     pub async fn async_read(file: impl AsRef<Path>) -> Result<Self, SolcIoError> {
         let file = file.as_ref();
-        Ok(Self {
-            content: tokio::fs::read_to_string(file)
-                .await
-                .map_err(|err| SolcIoError::new(err, file))?,
-        })
+        Ok(Self::new(
+            tokio::fs::read_to_string(file).await.map_err(|err| SolcIoError::new(err, file))?,
+        ))
     }
 
     /// Finds all source files under the given dir path and reads them all
@@ -1289,6 +1508,12 @@ impl Source {
 impl AsRef<str> for Source {
     fn as_ref(&self) -> &str {
         &self.content
+    }
+}
+
+impl AsRef<[u8]> for Source {
+    fn as_ref(&self) -> &[u8] {
+        self.content.as_bytes()
     }
 }
 
@@ -1371,12 +1596,6 @@ impl CompilerOutput {
         let files: HashSet<_> = files.into_iter().map(|s| s.to_lowercase()).collect();
         self.contracts.retain(|f, _| files.contains(f.to_lowercase().as_str()));
         self.sources.retain(|f, _| files.contains(f.to_lowercase().as_str()));
-        self.errors.retain(|err| {
-            err.source_location
-                .as_ref()
-                .map(|s| files.contains(s.file.to_lowercase().as_str()))
-                .unwrap_or(true)
-        });
     }
 
     pub fn merge(&mut self, other: CompilerOutput) {
@@ -1648,7 +1867,8 @@ pub struct Creation {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Ewasm {
-    pub wast: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wast: Option<String>,
     pub wasm: String,
 }
 
@@ -1709,31 +1929,211 @@ pub struct Error {
     pub formatted_message: Option<String>,
 }
 
+/// Tries to mimic Solidity's own error formatting.
+///
+/// <https://github.com/ethereum/solidity/blob/a297a687261a1c634551b1dac0e36d4573c19afe/liblangutil/SourceReferenceFormatter.cpp#L105>
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(msg) = &self.formatted_message {
-            match self.severity {
-                Severity::Error => {
-                    if let Some(code) = self.error_code {
-                        Paint::red(format!("error[{code}]: ")).fmt(f)?;
-                    }
-                    Paint::red(msg).fmt(f)
-                }
-                Severity::Warning | Severity::Info => {
-                    if let Some(code) = self.error_code {
-                        Paint::yellow(format!("warning[{code}]: ")).fmt(f)?;
-                    }
-                    Paint::yellow(msg).fmt(f)
-                }
-            }
-        } else {
-            self.severity.fmt(f)?;
-            writeln!(f, ": {}", self.message)
+        if !Paint::is_enabled() {
+            let msg = self.formatted_message.as_ref().unwrap_or(&self.message);
+            self.fmt_severity(f)?;
+            f.write_str(": ")?;
+            return f.write_str(msg)
         }
+
+        // Error (XXXX): Error Message
+        styled(f, self.severity.color().style().bold(), |f| self.fmt_severity(f))?;
+        fmt_msg(f, &self.message)?;
+
+        if let Some(msg) = &self.formatted_message {
+            let mut lines = msg.lines();
+
+            // skip first line, it should be similar to the error message we wrote above
+            lines.next();
+
+            // format the main source location
+            fmt_source_location(f, &mut lines)?;
+
+            // format remaining lines as secondary locations
+            while let Some(line) = lines.next() {
+                f.write_str("\n")?;
+
+                if let Some((note, msg)) = line.split_once(':') {
+                    styled(f, Self::secondary_style(), |f| f.write_str(note))?;
+                    fmt_msg(f, msg)?;
+                } else {
+                    f.write_str(line)?;
+                }
+
+                fmt_source_location(f, &mut lines)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Default)]
+impl Error {
+    /// The style of the diagnostic severity.
+    pub fn error_style(&self) -> Style {
+        self.severity.color().style().bold()
+    }
+
+    /// The style of the diagnostic message.
+    pub fn message_style() -> Style {
+        Color::White.style().bold()
+    }
+
+    /// The style of the secondary source location.
+    pub fn secondary_style() -> Style {
+        Color::Cyan.style().bold()
+    }
+
+    /// The style of the source location highlight.
+    pub fn highlight_style() -> Style {
+        Color::Yellow.style()
+    }
+
+    /// The style of the diagnostics.
+    pub fn diag_style() -> Style {
+        Color::Yellow.style().bold()
+    }
+
+    /// The style of the source location frame.
+    pub fn frame_style() -> Style {
+        Color::Blue.style()
+    }
+
+    /// Formats the diagnostic severity:
+    ///
+    /// ```text
+    /// Error (XXXX)
+    /// ```
+    fn fmt_severity(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.severity.as_str())?;
+        if let Some(code) = self.error_code {
+            write!(f, " ({code})")?;
+        }
+        Ok(())
+    }
+}
+
+/// Calls `fun` in between [`Style::fmt_prefix`] and [`Style::fmt_suffix`].
+fn styled<F>(f: &mut fmt::Formatter, style: Style, fun: F) -> fmt::Result
+where
+    F: FnOnce(&mut fmt::Formatter) -> fmt::Result,
+{
+    style.fmt_prefix(f)?;
+    fun(f)?;
+    style.fmt_suffix(f)
+}
+
+/// Formats the diagnostic message.
+fn fmt_msg(f: &mut fmt::Formatter, msg: &str) -> fmt::Result {
+    styled(f, Error::message_style(), |f| {
+        f.write_str(": ")?;
+        f.write_str(msg.trim_start())
+    })
+}
+
+/// Colors a Solidity source location:
+///
+/// ```text
+/// --> /home/user/contract.sol:420:69:
+///     |
+/// 420 |       bad_code()
+///     |                ^
+/// ```
+fn fmt_source_location(f: &mut fmt::Formatter, lines: &mut std::str::Lines) -> fmt::Result {
+    // --> source
+    if let Some(line) = lines.next() {
+        f.write_str("\n")?;
+
+        let arrow = "-->";
+        if let Some((left, loc)) = line.split_once(arrow) {
+            f.write_str(left)?;
+            styled(f, Error::frame_style(), |f| f.write_str(arrow))?;
+            f.write_str(loc)?;
+        } else {
+            f.write_str(line)?;
+        }
+    }
+
+    // get the next 3 lines
+    // FIXME: Somehow do this without allocating
+    let next_3 = lines.take(3).collect::<Vec<_>>();
+    let [line1, line2, line3] = next_3[..] else {
+        for line in next_3 {
+            f.write_str("\n")?;
+            f.write_str(line)?;
+        }
+        return Ok(())
+    };
+
+    // line 1, just a frame
+    fmt_framed_location(f, line1, None)?;
+
+    // line 2, frame and code; highlight the text based on line 3's carets
+    let hl_start = line3.find('^');
+    let highlight = hl_start.map(|start| {
+        let end = if line3.contains("^ (") {
+            // highlight the entire line because of "spans across multiple lines" diagnostic
+            line2.len()
+        } else if let Some(carets) = line3[start..].find(|c: char| c != '^') {
+            // highlight the text that the carets point to
+            start + carets
+        } else {
+            // the carets span the entire third line
+            line3.len()
+        }
+        // bound in case carets span longer than the code they point to
+        .min(line2.len());
+        (start.min(end)..end, Error::highlight_style())
+    });
+    fmt_framed_location(f, line2, highlight)?;
+
+    // line 3, frame and maybe highlight, this time till the end unconditionally
+    let highlight = hl_start.map(|i| (i..line3.len(), Error::diag_style()));
+    fmt_framed_location(f, line3, highlight)
+}
+
+/// Colors a single Solidity framed source location line. Part of [`fmt_source_location`].
+fn fmt_framed_location(
+    f: &mut fmt::Formatter,
+    line: &str,
+    highlight: Option<(Range<usize>, Style)>,
+) -> fmt::Result {
+    f.write_str("\n")?;
+
+    if let Some((space_or_line_number, rest)) = line.split_once('|') {
+        // if the potential frame is not just whitespace or numbers, don't color it
+        if !space_or_line_number.chars().all(|c| c.is_whitespace() || c.is_numeric()) {
+            return f.write_str(line)
+        }
+
+        styled(f, Error::frame_style(), |f| {
+            f.write_str(space_or_line_number)?;
+            f.write_str("|")
+        })?;
+
+        if let Some((range, style)) = highlight {
+            let Range { start, end } = range;
+            let rest_start = line.len() - rest.len();
+            f.write_str(&line[rest_start..start])?;
+            styled(f, style, |f| f.write_str(&line[range]))?;
+            f.write_str(&line[end..])
+        } else {
+            f.write_str(rest)
+        }
+    } else {
+        f.write_str(line)
+    }
+}
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     #[default]
     Error,
@@ -1743,25 +2143,7 @@ pub enum Severity {
 
 impl fmt::Display for Severity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Severity::Error => Paint::red("Error").fmt(f),
-            Severity::Warning => Paint::yellow("Warning").fmt(f),
-            Severity::Info => f.write_str("Info"),
-        }
-    }
-}
-
-impl Severity {
-    pub fn is_error(&self) -> bool {
-        matches!(self, Severity::Error)
-    }
-
-    pub fn is_warning(&self) -> bool {
-        matches!(self, Severity::Warning)
-    }
-
-    pub fn is_info(&self) -> bool {
-        matches!(self, Severity::Info)
+        f.write_str(self.as_str())
     }
 }
 
@@ -1770,50 +2152,46 @@ impl FromStr for Severity {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "error" => Ok(Severity::Error),
-            "warning" => Ok(Severity::Warning),
-            "info" => Ok(Severity::Info),
+            "Error" | "error" => Ok(Self::Error),
+            "Warning" | "warning" => Ok(Self::Warning),
+            "Info" | "info" => Ok(Self::Info),
             s => Err(format!("Invalid severity: {s}")),
         }
     }
 }
 
-impl Serialize for Severity {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
+impl Severity {
+    /// Returns `true` if the severity is `Error`.
+    pub const fn is_error(&self) -> bool {
+        matches!(self, Self::Error)
+    }
+
+    /// Returns `true` if the severity is `Warning`.
+    pub const fn is_warning(&self) -> bool {
+        matches!(self, Self::Warning)
+    }
+
+    /// Returns `true` if the severity is `Info`.
+    pub const fn is_info(&self) -> bool {
+        matches!(self, Self::Info)
+    }
+
+    /// Returns the string representation of the severity.
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            Severity::Error => serializer.serialize_str("error"),
-            Severity::Warning => serializer.serialize_str("warning"),
-            Severity::Info => serializer.serialize_str("info"),
+            Self::Error => "Error",
+            Self::Warning => "Warning",
+            Self::Info => "Info",
         }
     }
-}
 
-impl<'de> Deserialize<'de> for Severity {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct SeverityVisitor;
-
-        impl<'de> Visitor<'de> for SeverityVisitor {
-            type Value = Severity;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(formatter, "severity string")
-            }
-
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                value.parse().map_err(serde::de::Error::custom)
-            }
+    /// Returns the color to format the severity with.
+    pub const fn color(&self) -> Color {
+        match self {
+            Self::Error => Color::Red,
+            Self::Warning => Color::Yellow,
+            Self::Info => Color::White,
         }
-
-        deserializer.deserialize_str(SeverityVisitor)
     }
 }
 
@@ -1893,7 +2271,6 @@ mod tests {
     use super::*;
     use crate::AggregatedCompilerOutput;
     use ethers_core::types::Address;
-    use std::{fs, path::PathBuf};
 
     #[test]
     fn can_parse_declaration_error() {
@@ -2023,12 +2400,16 @@ mod tests {
     #[test]
     fn test_evm_version_normalization() {
         for (solc_version, evm_version, expected) in &[
-            // Ensure 0.4.21 it always returns None
+            // Everything before 0.4.21 should always return None
             ("0.4.20", EvmVersion::Homestead, None),
-            // Constantinople clipping
+            // Byzantium clipping
             ("0.4.21", EvmVersion::Homestead, Some(EvmVersion::Homestead)),
-            ("0.4.21", EvmVersion::Constantinople, Some(EvmVersion::Constantinople)),
-            ("0.4.21", EvmVersion::London, Some(EvmVersion::Constantinople)),
+            ("0.4.21", EvmVersion::Constantinople, Some(EvmVersion::Byzantium)),
+            ("0.4.21", EvmVersion::London, Some(EvmVersion::Byzantium)),
+            // Constantinople bug fix
+            ("0.4.22", EvmVersion::Homestead, Some(EvmVersion::Homestead)),
+            ("0.4.22", EvmVersion::Constantinople, Some(EvmVersion::Constantinople)),
+            ("0.4.22", EvmVersion::London, Some(EvmVersion::Constantinople)),
             // Petersburg
             ("0.5.5", EvmVersion::Homestead, Some(EvmVersion::Homestead)),
             ("0.5.5", EvmVersion::Petersburg, Some(EvmVersion::Petersburg)),
@@ -2044,11 +2425,21 @@ mod tests {
             // London
             ("0.8.7", EvmVersion::Homestead, Some(EvmVersion::Homestead)),
             ("0.8.7", EvmVersion::London, Some(EvmVersion::London)),
-            ("0.8.7", EvmVersion::London, Some(EvmVersion::London)),
+            ("0.8.7", EvmVersion::Paris, Some(EvmVersion::London)),
+            // Paris
+            ("0.8.18", EvmVersion::Homestead, Some(EvmVersion::Homestead)),
+            ("0.8.18", EvmVersion::Paris, Some(EvmVersion::Paris)),
+            ("0.8.18", EvmVersion::Shanghai, Some(EvmVersion::Paris)),
+            // Shanghai
+            ("0.8.20", EvmVersion::Homestead, Some(EvmVersion::Homestead)),
+            ("0.8.20", EvmVersion::Paris, Some(EvmVersion::Paris)),
+            ("0.8.20", EvmVersion::Shanghai, Some(EvmVersion::Shanghai)),
         ] {
+            let version = Version::from_str(solc_version).unwrap();
             assert_eq!(
-                &evm_version.normalize_version(&Version::from_str(solc_version).unwrap()),
-                expected
+                &evm_version.normalize_version(&version),
+                expected,
+                "({version}, {evm_version:?})"
             )
         }
     }
@@ -2091,8 +2482,7 @@ mod tests {
         let i = input.clone().sanitized(&version);
         assert_eq!(i.settings.metadata.unwrap().cbor_metadata, Some(true));
 
-        let version: Version = "0.8.0".parse().unwrap();
-        let i = input.sanitized(&version);
+        let i = input.sanitized(&Version::new(0, 8, 0));
         assert!(i.settings.metadata.unwrap().cbor_metadata.is_none());
     }
 
@@ -2188,9 +2578,9 @@ mod tests {
 
     #[test]
     fn test_lossless_storage_layout() {
-        let input = include_str!("../../test-data/foundryissue2462.json");
+        let input = include_str!("../../test-data/foundryissue2462.json").trim();
         let layout: StorageLayout = serde_json::from_str(input).unwrap();
-        pretty_assertions::assert_eq!(input, &serde_json::to_string_pretty(&layout).unwrap());
+        pretty_assertions::assert_eq!(input, &serde_json::to_string(&layout).unwrap());
     }
 
     // <https://github.com/foundry-rs/foundry/issues/3012>

@@ -1,56 +1,67 @@
-#![cfg(feature = "abigen")]
-#![allow(unused)]
 //! Test cases to validate the `abigen!` macro
-use ethers_contract::{abigen, Abigen, EthCall, EthEvent};
-use ethers_core::{
-    abi::{AbiDecode, AbiEncode, Address, Tokenizable},
-    types::{transaction::eip2718::TypedTransaction, Chain, Eip1559TransactionRequest, U256},
-    utils::Anvil,
-};
-use ethers_providers::{MockProvider, Provider};
-use ethers_solc::Solc;
-use std::{
-    convert::{TryFrom, TryInto},
-    sync::Arc,
-};
 
-fn assert_codec<T: AbiDecode + AbiEncode>() {}
-fn assert_tokenizeable<T: Tokenizable>() {}
-fn assert_call<T: AbiEncode + AbiDecode + Default + Tokenizable>() {}
-fn assert_event<T: EthEvent>() {}
+use ethers_contract::{abigen, EthEvent};
+use ethers_core::{
+    abi::{AbiDecode, AbiEncode, Tokenizable},
+    types::{Address, Bytes, U256},
+};
+use std::{fmt::Debug, hash::Hash, str::FromStr};
+
+#[cfg(feature = "providers")]
+use ethers_contract::{ContractError, EthCall, EthError};
+#[cfg(feature = "providers")]
+use ethers_core::utils::Anvil;
+#[cfg(feature = "providers")]
+use ethers_providers::{MockProvider, Provider};
+#[cfg(feature = "providers")]
+use std::sync::Arc;
+
+const fn assert_codec<T: AbiDecode + AbiEncode>() {}
+#[cfg(feature = "providers")]
+const fn assert_tokenizeable<T: Tokenizable>() {}
+const fn assert_call<T: AbiEncode + AbiDecode + Default + Tokenizable>() {}
+const fn assert_event<T: EthEvent>() {}
+const fn assert_clone<T: Clone>() {}
+const fn assert_default<T: Default>() {}
+const fn assert_builtin<T: Debug + PartialEq + Eq + Hash>() {}
+const fn assert_struct<T>()
+where
+    T: AbiEncode + AbiDecode + Tokenizable + Clone + Default + Debug + PartialEq + Eq + Hash,
+{
+}
 
 #[test]
-fn can_gen_human_readable() {
+fn can_generate_human_readable() {
     abigen!(
         SimpleContract,
         r#"[
         event ValueChanged(address indexed author, string oldValue, string newValue)
     ]"#,
-        event_derives(serde::Deserialize, serde::Serialize)
+        derives(serde::Deserialize, serde::Serialize)
     );
     assert_eq!("ValueChanged", ValueChangedFilter::name());
     assert_eq!("ValueChanged(address,string,string)", ValueChangedFilter::abi_signature());
 }
 
 #[test]
-fn can_gen_not_human_readable() {
+fn can_generate_not_human_readable() {
     abigen!(VerifierAbiHardhatContract, "./tests/solidity-contracts/verifier_abi_hardhat.json");
 }
 
 #[test]
-fn can_gen_human_readable_multiple() {
+fn can_generate_human_readable_multiple() {
     abigen!(
         SimpleContract1,
         r#"[
         event ValueChanged1(address indexed author, string oldValue, string newValue)
     ]"#,
-        event_derives(serde::Deserialize, serde::Serialize);
+        derives(serde::Deserialize, serde::Serialize);
 
         SimpleContract2,
         r#"[
         event ValueChanged2(address indexed author, string oldValue, string newValue)
     ]"#,
-        event_derives(serde::Deserialize, serde::Serialize)
+        derives(serde::Deserialize, serde::Serialize)
     );
     assert_eq!("ValueChanged1", ValueChanged1Filter::name());
     assert_eq!("ValueChanged1(address,string,string)", ValueChanged1Filter::abi_signature());
@@ -59,7 +70,7 @@ fn can_gen_human_readable_multiple() {
 }
 
 #[test]
-fn can_gen_structs_readable() {
+fn can_generate_structs_readable() {
     abigen!(
         SimpleContract,
         r#"[
@@ -67,7 +78,7 @@ fn can_gen_structs_readable() {
         struct Addresses {address[] addr; string s;}
         event ValueChanged(Value indexed old, Value newValue, Addresses _a)
     ]"#,
-        event_derives(serde::Deserialize, serde::Serialize)
+        derives(serde::Deserialize, serde::Serialize)
     );
     let addr = Addresses {
         addr: vec!["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".parse().unwrap()],
@@ -90,7 +101,7 @@ fn can_gen_structs_readable() {
 }
 
 #[test]
-fn can_gen_structs_with_arrays_readable() {
+fn can_generate_structs_with_arrays_readable() {
     abigen!(
         SimpleContract,
         r#"[
@@ -98,7 +109,7 @@ fn can_gen_structs_with_arrays_readable() {
         struct Addresses {address[] addr; string s;}
         event ValueChanged(Value indexed old, Value newValue, Addresses[] _a)
     ]"#,
-        event_derives(serde::Deserialize, serde::Serialize)
+        derives(serde::Deserialize, serde::Serialize)
     );
     assert_eq!(
         "ValueChanged((address,string),(address,string),(address[],string)[])",
@@ -114,18 +125,36 @@ fn can_generate_internal_structs() {
     abigen!(
         VerifierContract,
         "ethers-contract/tests/solidity-contracts/verifier_abi.json",
-        event_derives(serde::Deserialize, serde::Serialize)
+        derives(serde::Deserialize, serde::Serialize)
     );
-    assert_tokenizeable::<VerifyingKey>();
-    assert_tokenizeable::<G1Point>();
-    assert_tokenizeable::<G2Point>();
-
-    assert_codec::<VerifyingKey>();
-    assert_codec::<G1Point>();
-    assert_codec::<G2Point>();
+    assert_struct::<VerifyingKey>();
+    assert_struct::<G1Point>();
+    assert_struct::<G2Point>();
 }
 
 #[test]
+fn can_generate_internal_structs_2() {
+    abigen!(Beefy, "./tests/solidity-contracts/BeefyV1.json");
+    assert_struct::<AuthoritySetCommitment>();
+    assert_struct::<BeefyConsensusState>();
+    assert_struct::<ProofNode>();
+    assert_struct::<BeefyConsensusProof>();
+
+    let s =
+        AuthoritySetCommitment { id: U256::from(1), len: U256::from(2), root: Default::default() };
+    let _encoded = AbiEncode::encode(s.clone());
+
+    let s = BeefyConsensusState { current_authority_set: s, ..Default::default() };
+    let _encoded = AbiEncode::encode(s);
+
+    // tuple[][]
+    let node = ProofNode::default();
+    let s = BeefyConsensusProof { authorities_proof: vec![vec![node; 2]; 2], ..Default::default() };
+    let _encoded = AbiEncode::encode(s);
+}
+
+#[test]
+#[cfg(feature = "providers")]
 fn can_generate_internal_structs_multiple() {
     // NOTE: nesting here is necessary due to how tests are structured...
     use contract::*;
@@ -134,11 +163,11 @@ fn can_generate_internal_structs_multiple() {
         abigen!(
             VerifierContract,
             "ethers-contract/tests/solidity-contracts/verifier_abi.json",
-            event_derives(serde::Deserialize, serde::Serialize);
+            derives(serde::Deserialize, serde::Serialize);
 
             MyOtherVerifierContract,
             "ethers-contract/tests/solidity-contracts/verifier_abi.json",
-            event_derives(serde::Deserialize, serde::Serialize);
+            derives(serde::Deserialize, serde::Serialize);
         );
     }
     assert_tokenizeable::<VerifyingKey>();
@@ -171,7 +200,7 @@ fn can_generate_internal_structs_multiple() {
 }
 
 #[test]
-fn can_gen_return_struct() {
+fn can_generate_return_struct() {
     abigen!(MultiInputOutput, "ethers-contract/tests/solidity-contracts/MultiInputOutput.json");
 
     fn verify<T: AbiEncode + AbiDecode + Clone + std::fmt::Debug + std::cmp::PartialEq>(
@@ -199,7 +228,8 @@ fn can_gen_return_struct() {
 }
 
 #[test]
-fn can_gen_human_readable_with_structs() {
+#[cfg(feature = "providers")]
+fn can_generate_human_readable_with_structs() {
     abigen!(
         SimpleContract,
         r#"[
@@ -208,7 +238,7 @@ fn can_gen_human_readable_with_structs() {
         function bar(uint256 x, uint256 y, address addr)
         yeet(uint256,uint256,address)
     ]"#,
-        event_derives(serde::Deserialize, serde::Serialize)
+        derives(serde::Deserialize, serde::Serialize)
     );
     assert_tokenizeable::<Foo>();
     assert_codec::<Foo>();
@@ -246,6 +276,7 @@ fn can_gen_human_readable_with_structs() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_overloaded_functions() {
     abigen!(
         SimpleContract,
@@ -332,62 +363,6 @@ fn can_handle_even_more_overloaded_functions() {
     let _contract_call = ConsoleLogCalls::Log2(call);
 }
 
-#[tokio::test]
-async fn can_handle_underscore_functions() {
-    abigen!(
-        SimpleStorage,
-        r#"[
-            _hashPuzzle() (uint256)
-        ]"#;
-
-        SimpleStorage2,
-        "ethers-contract/tests/solidity-contracts/simplestorage_abi.json",
-    );
-
-    // launch the network & connect to it
-    let anvil = Anvil::new().spawn();
-    let from = anvil.addresses()[0];
-    let provider = Provider::try_from(anvil.endpoint())
-        .unwrap()
-        .with_sender(from)
-        .interval(std::time::Duration::from_millis(10));
-    let client = Arc::new(provider);
-
-    let contract = "SimpleStorage";
-    let path = "./tests/solidity-contracts/SimpleStorage.sol";
-    let compiled = Solc::default().compile_source(path).unwrap();
-    let compiled = compiled.get(path, contract).unwrap();
-    let factory = ethers_contract::ContractFactory::new(
-        compiled.abi.unwrap().clone(),
-        compiled.bytecode().unwrap().clone(),
-        client.clone(),
-    );
-    let addr = factory.deploy("hi".to_string()).unwrap().legacy().send().await.unwrap().address();
-
-    // connect to the contract
-    let contract = SimpleStorage::new(addr, client.clone());
-    let contract2 = SimpleStorage2::new(addr, client.clone());
-
-    let res = contract.hash_puzzle().call().await.unwrap();
-    let res2 = contract2.hash_puzzle().call().await.unwrap();
-    let res3 = contract.method::<_, U256>("_hashPuzzle", ()).unwrap().call().await.unwrap();
-    let res4 = contract2.method::<_, U256>("_hashPuzzle", ()).unwrap().call().await.unwrap();
-
-    // Manual call construction
-    use ethers_providers::Middleware;
-    // TODO: How do we handle underscores for calls here?
-    let data = simple_storage::HashPuzzleCall.encode();
-    let tx = Eip1559TransactionRequest::new().data(data).to(addr);
-    let tx = TypedTransaction::Eip1559(tx);
-    let res5 = client.call(&tx, None).await.unwrap();
-    let res5 = U256::from(res5.as_ref());
-    assert_eq!(res, 100.into());
-    assert_eq!(res, res2);
-    assert_eq!(res, res3);
-    assert_eq!(res, res4);
-    assert_eq!(res, res5);
-}
-
 #[test]
 fn can_handle_unique_underscore_functions() {
     abigen!(
@@ -417,6 +392,7 @@ fn can_handle_unique_underscore_functions() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_underscore_numeric() {
     abigen!(
         Test,
@@ -455,11 +431,12 @@ fn can_handle_duplicates_with_same_name() {
 }
 
 #[test]
-fn can_abigen_console_sol() {
+fn can_abican_generate_console_sol() {
     abigen!(Console, "ethers-contract/tests/solidity-contracts/console.json",);
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_generate_nested_types() {
     abigen!(
         Test,
@@ -487,6 +464,7 @@ fn can_generate_nested_types() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_different_calls() {
     abigen!(
         Test,
@@ -504,6 +482,7 @@ fn can_handle_different_calls() {
 }
 
 #[test]
+#[cfg(feature = "providers")]
 fn can_handle_case_sensitive_calls() {
     abigen!(
         StakedOHM,
@@ -521,6 +500,7 @@ fn can_handle_case_sensitive_calls() {
 }
 
 #[tokio::test]
+#[cfg(feature = "providers")]
 async fn can_deploy_greeter() {
     abigen!(Greeter, "ethers-contract/tests/solidity-contracts/greeter.json",);
     let anvil = Anvil::new().spawn();
@@ -539,8 +519,10 @@ async fn can_deploy_greeter() {
 }
 
 #[tokio::test]
+#[cfg(feature = "providers")]
 async fn can_abiencoderv2_output() {
-    abigen!(AbiEncoderv2Test, "ethers-contract/tests/solidity-contracts/abiencoderv2test_abi.json",);
+    abigen!(AbiEncoderv2Test, "ethers-contract/tests/solidity-contracts/Abiencoderv2Test.json");
+
     let anvil = Anvil::new().spawn();
     let from = anvil.addresses()[0];
     let provider = Provider::try_from(anvil.endpoint())
@@ -549,27 +531,16 @@ async fn can_abiencoderv2_output() {
         .interval(std::time::Duration::from_millis(10));
     let client = Arc::new(provider);
 
-    let contract = "AbiencoderV2Test";
-    let path = "./tests/solidity-contracts/Abiencoderv2Test.sol";
-    let compiled = Solc::default().compile_source(path).unwrap();
-    let compiled = compiled.get(path, contract).unwrap();
-    let factory = ethers_contract::ContractFactory::new(
-        compiled.abi.unwrap().clone(),
-        compiled.bytecode().unwrap().clone(),
-        client.clone(),
-    );
-    let addr = factory.deploy(()).unwrap().legacy().send().await.unwrap().address();
+    let contract = AbiEncoderv2Test::deploy(client, ()).unwrap().legacy().send().await.unwrap();
 
-    let contract = AbiEncoderv2Test::new(addr, client.clone());
     let person = Person { name: "Alice".to_string(), age: 20u64.into() };
-
     let res = contract.default_person().call().await.unwrap();
     assert_eq!(res, person);
 }
 
 // NOTE: this is commented out because this would result in compiler errors if key not set or
 // etherscan API not working #[test]
-// fn can_gen_multi_etherscan() {
+// fn can_generate_multi_etherscan() {
 //     abigen!(
 //         MyContract, "etherscan:0xdAC17F958D2ee523a2206206994597C13D831ec7";
 //         MyContract2, "etherscan:0x8418bb725b3ac45ec8fff3791dd8b4e0480cc2a2";
@@ -581,7 +552,7 @@ async fn can_abiencoderv2_output() {
 // }
 
 #[test]
-fn can_gen_reserved_word_field_names() {
+fn can_generate_reserved_word_field_names() {
     abigen!(
         Test,
         r#"[
@@ -612,6 +583,7 @@ fn can_handle_overloaded_events() {
 
 #[tokio::test]
 #[cfg(not(feature = "celo"))]
+#[cfg(feature = "providers")]
 async fn can_send_struct_param() {
     abigen!(StructContract, "./tests/solidity-contracts/StructContract.json");
 
@@ -636,8 +608,9 @@ async fn can_send_struct_param() {
 }
 
 #[test]
-fn can_gen_seaport() {
-    abigen!(Seaport, "./tests/solidity-contracts/seaport.json");
+#[cfg(feature = "providers")]
+fn can_generate_seaport_1_0() {
+    abigen!(Seaport, "./tests/solidity-contracts/seaport_1_0.json");
 
     assert_eq!(
         FulfillAdvancedOrderCall::abi_signature(),
@@ -646,16 +619,67 @@ fn can_gen_seaport() {
     assert_eq!(hex::encode(FulfillAdvancedOrderCall::selector()), "e7acab24");
 
     assert_codec::<SeaportErrors>();
-    let err = SeaportErrors::BadContractSignature(BadContractSignature::default());
+    let err = SeaportErrors::BadContractSignature(BadContractSignature);
 
     let encoded = err.clone().encode();
-    assert_eq!(err, SeaportErrors::decode(encoded).unwrap());
+    assert_eq!(err, SeaportErrors::decode(encoded.clone()).unwrap());
 
-    let err = SeaportErrors::ConsiderationNotMet(ConsiderationNotMet {
+    let with_selector: Bytes =
+        BadContractSignature::selector().into_iter().chain(encoded).collect();
+    let contract_err = ContractError::<Provider<MockProvider>>::Revert(with_selector);
+
+    assert_eq!(contract_err.decode_contract_revert(), Some(err));
+
+    let _err = SeaportErrors::ConsiderationNotMet(ConsiderationNotMet {
         order_index: U256::zero(),
         consideration_index: U256::zero(),
         shortfall_amount: U256::zero(),
     });
+}
+
+#[test]
+fn can_generate_seaport_gt1_0() {
+    mod v1_1 {
+        use super::*;
+        abigen!(Seaport1, "./tests/solidity-contracts/seaport_1_1.json");
+    }
+
+    // (address,uint256,uint256,address,address,address,uint256
+    mod v1_2 {
+        use super::*;
+        abigen!(Seaport2, "./tests/solidity-contracts/seaport_1_2.json");
+    }
+
+    mod v1_3 {
+        use super::*;
+        abigen!(Seaport3, "./tests/solidity-contracts/seaport_1_3.json");
+    }
+
+    // tuples len <= 12
+    assert_clone::<v1_1::FulfillAdvancedOrderCall>();
+    assert_default::<v1_1::FulfillAdvancedOrderCall>();
+    assert_builtin::<v1_1::FulfillAdvancedOrderCall>();
+
+    assert_clone::<v1_2::FulfillAdvancedOrderCall>();
+    assert_default::<v1_2::FulfillAdvancedOrderCall>();
+    assert_builtin::<v1_2::FulfillAdvancedOrderCall>();
+
+    assert_clone::<v1_3::FulfillAdvancedOrderCall>();
+    assert_default::<v1_3::FulfillAdvancedOrderCall>();
+    assert_builtin::<v1_3::FulfillAdvancedOrderCall>();
+
+    // tuples len > 12
+    assert_clone::<v1_1::FulfillBasicOrderCall>();
+    // assert_default::<v1_1::FulfillBasicOrderCall>();
+    // assert_builtin::<v1_1::FulfillBasicOrderCall>();
+
+    assert_clone::<v1_2::FulfillBasicOrderCall>();
+    // assert_default::<v1_2::FulfillBasicOrderCall>();
+    // assert_builtin::<v1_2::FulfillBasicOrderCall>();
+
+    assert_clone::<v1_3::FulfillBasicOrderCall>();
+    // assert_default::<v1_3::FulfillBasicOrderCall>();
+    // assert_builtin::<v1_3::FulfillBasicOrderCall>();
 }
 
 #[test]
@@ -691,11 +715,20 @@ fn can_generate_large_event() {
 fn can_generate_large_output_struct() {
     abigen!(LargeOutputStruct, "ethers-contract/tests/solidity-contracts/LargeStruct.json");
 
-    let r = GetByIdReturn(Info::default());
+    let _r = GetByIdReturn(Info::default());
 }
 
 #[test]
-fn gen_complex_function() {
+fn can_generate_large_structs() {
+    abigen!(LargeStructs, "ethers-contract/tests/solidity-contracts/LargeStructs.json");
+
+    assert_struct::<PoolStorage>();
+    assert_struct::<AssetStorage>();
+    assert_struct::<ChainStorage>();
+}
+
+#[test]
+fn can_generate_complex_function() {
     abigen!(
         WyvernExchangeV1,
         r#"[
@@ -705,21 +738,21 @@ fn gen_complex_function() {
 }
 
 #[test]
-fn can_gen_large_tuple_types() {
+fn can_generate_large_tuple_types() {
     abigen!(LargeTuple, "./tests/solidity-contracts/large_tuple.json");
 }
 
 #[test]
-fn can_gen_large_tuple_array() {
-    abigen!(LargeTuple, "./tests/solidity-contracts/large-array.json");
+fn can_generate_large_tuple_array() {
+    abigen!(LargeArray, "./tests/solidity-contracts/large-array.json");
 
+    #[allow(unknown_lints, non_local_definitions)]
     impl Default for CallWithLongArrayCall {
         fn default() -> Self {
             Self { long_array: [0; 128] }
         }
     }
 
-    let _call = CallWithLongArrayCall::default();
     assert_call::<CallWithLongArrayCall>();
 }
 
@@ -743,10 +776,119 @@ fn can_handle_overloaded_function_with_array() {
     abigen!(
         Test,
         r#"[
-         serializeString(string calldata, string calldata, string calldata) external returns (string memory)
-         serializeString(string calldata, string calldata, string[] calldata) external returns (string memory)
-         serializeBool(string calldata, string calldata, bool) external returns (string memory)
-         serializeBool(string calldata, string calldata, bool[] calldata) external returns (string memory)
-    ]"#,
+            serializeString(string calldata, string calldata, string calldata) external returns (string memory)
+            serializeString(string calldata, string calldata, string[] calldata) external returns (string memory)
+            serializeBool(string calldata, string calldata, bool) external returns (string memory)
+            serializeBool(string calldata, string calldata, bool[] calldata) external returns (string memory)
+        ]"#,
     );
+}
+
+#[test]
+#[cfg(feature = "providers")]
+#[allow(clippy::disallowed_names)]
+fn convert_uses_correct_abi() {
+    abigen!(
+        Foo, r#"[function foo()]"#;
+        Bar, r#"[function bar()]"#;
+    );
+
+    let provider = Arc::new(Provider::new(MockProvider::new()));
+    let foo = Foo::new(Address::default(), Arc::clone(&provider));
+
+    let contract: &ethers_contract::Contract<_> = &foo;
+    let bar: Bar<Provider<MockProvider>> = contract.clone().into();
+
+    // Ensure that `bar` is using the `Bar` ABI internally (this method lookup will panic if `bar`
+    // is incorrectly using the `Foo` ABI internally).
+    drop(bar.bar().call());
+}
+
+#[test]
+fn generates_non_zero_bytecode() {
+    abigen!(Greeter, "ethers-contract/tests/solidity-contracts/greeter_with_struct.json");
+    //check that the bytecode is not empty
+    assert!(GREETER_BYTECODE.len() > 0);
+    assert!(GREETER_DEPLOYED_BYTECODE.len() > 0);
+    //sanity check that the bytecode is not the same
+    assert_ne!(GREETER_BYTECODE, GREETER_DEPLOYED_BYTECODE);
+}
+
+#[test]
+fn can_generate_hardhat_console() {
+    abigen!(HardhatConsole, "./tests/solidity-contracts/console.json");
+
+    fn exists<T>() {}
+    exists::<HardhatConsoleCalls>();
+}
+
+#[test]
+fn abigen_overloaded_methods() {
+    abigen!(
+        OverloadedFuncs,
+        r"[
+        function myfunc(address,uint256) external returns (bool)
+        function myfunc(address,address) external returns (bool)
+        function myfunc(address,address[]) external returns (bool)
+        function myfunc(address[2],address,address[]) external returns (bool)
+        ]",
+        methods {
+            myfunc(address,uint256) as myfunc1;
+            myfunc(address,address) as myfunc2;
+            myfunc(address,address[]) as myfunc3;
+            myfunc(address[2],address,address[]) as myfunc4;
+        },
+    );
+
+    let address = Address::random();
+    let f1 = Myfunc1Call(address, U256::from(10));
+    let _ = Myfunc2Call(address, address);
+    let _ = Myfunc3Call(address, vec![address]);
+    let f4 = Myfunc4Call([address, address], address, vec![address, address, address, address]);
+    assert_eq!(f1.1, U256::from(10));
+    assert_eq!(f4.0, [address, address]);
+    assert_eq!(f4.1, address);
+}
+
+#[test]
+fn abigen_overloaded_methods2() {
+    abigen!(OverloadedFuncs, "./tests/solidity-contracts/OverloadedFuncs.json",
+        methods {
+            execute(bytes, bytes[]) as execute_base;
+            execute(bytes, bytes[], uint256) as execute_uin256;
+            execute(bytes, bytes[3], uint256, bytes[]) as execute_fixed_arr;
+        },
+    );
+
+    let b1 = Bytes::from_str("0xabcd").unwrap();
+    let b2 = Bytes::from_str("0x12").unwrap();
+
+    let e1 = ExecuteBaseCall(b1.clone(), vec![b1.clone(), b2.clone()]);
+    let e2 = ExecuteUin256Call(b1.clone(), vec![b1.clone(), b2.clone()], U256::from(123));
+    let e3 = ExecuteFixedArrCall(
+        b1.clone(),
+        [b1.clone(), b2.clone(), b1.clone()],
+        U256::from(50),
+        vec![b1.clone(), b2.clone()],
+    );
+
+    let e1_encoded: Bytes = e1.encode().into();
+
+    assert_eq!(e2.0, b1);
+    assert_eq!(e3.0, b1);
+    assert_eq!(e3.3, vec![b1, b2]);
+    assert_eq!(e1_encoded.to_string(), "0x24856bc3000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000002abcd0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000002abcd00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000011200000000000000000000000000000000000000000000000000000000000000");
+}
+
+// https://github.com/foundry-rs/foundry/issues/7181
+#[test]
+fn abigen_default() {
+    // https://github.com/Layr-Labs/eigenlayer-middleware/blob/a79742bda7f967ce066df39b26f456afb61d6c28/test/utils/ProofParsing.sol#L132
+    abigen!(
+        ProofParsing,
+        r#"[
+            function getValidatorProof() public returns(bytes32[46] memory)
+        ]"#
+    );
+    // GetValidatorProofReturn cannot be Default
 }

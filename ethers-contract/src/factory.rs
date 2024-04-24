@@ -1,4 +1,4 @@
-use crate::{Contract, ContractError};
+use crate::{ContractError, ContractInstance};
 
 use ethers_core::{
     abi::{Abi, Token, Tokenize},
@@ -15,33 +15,62 @@ use ethers_providers::{
 #[cfg(not(feature = "legacy"))]
 use ethers_core::types::Eip1559TransactionRequest;
 
-use std::{marker::PhantomData, sync::Arc};
+use std::{borrow::Borrow, marker::PhantomData, sync::Arc};
 
-/// Helper which manages the deployment transaction of a smart contract.
+/// `ContractDeployer` is a [`ContractDeploymentTx`] object with an
+/// [`Arc`] middleware. This type alias exists to preserve backwards
+/// compatibility with less-abstract Contracts.
 ///
-/// This is just a wrapper type for [Deployer] with an additional type to convert the [Contract]
-/// that the deployer returns when sending the transaction.
+/// For full usage docs, see [`ContractDeploymentTx`].
+pub type ContractDeployer<M, C> = ContractDeploymentTx<Arc<M>, M, C>;
+
+/// `ContractFactory` is a [`DeploymentTxFactory`] object with an
+/// [`Arc`] middleware. This type alias exists to preserve backwards
+/// compatibility with less-abstract Contracts.
+///
+/// For full usage docs, see [`DeploymentTxFactory`].
+pub type ContractFactory<M> = DeploymentTxFactory<Arc<M>, M>;
+
+/// Helper which manages the deployment transaction of a smart contract. It
+/// wraps a deployment transaction, and retrieves the contract address output
+/// by it.
+///
+/// Currently, we recommend using the [`ContractDeployer`] type alias.
 #[derive(Debug)]
-#[must_use = "Deployer does nothing unless you `send` it"]
-pub struct ContractDeployer<M, C> {
+#[must_use = "DeploymentTx does nothing unless you `send` it"]
+pub struct ContractDeploymentTx<B, M, C> {
     /// the actual deployer, exposed for overriding the defaults
-    pub deployer: Deployer<M>,
+    pub deployer: Deployer<B, M>,
     /// marker for the `Contract` type to create afterwards
     ///
     /// this type will be used to construct it via `From::from(Contract)`
     _contract: PhantomData<C>,
 }
 
-impl<M, C> Clone for ContractDeployer<M, C> {
+impl<B, M, C> Clone for ContractDeploymentTx<B, M, C>
+where
+    B: Clone,
+{
     fn clone(&self) -> Self {
-        ContractDeployer { deployer: self.deployer.clone(), _contract: self._contract }
+        ContractDeploymentTx { deployer: self.deployer.clone(), _contract: self._contract }
     }
 }
 
-impl<M: Middleware, C: From<Contract<M>>> ContractDeployer<M, C> {
-    /// Create a new instance of this [ContractDeployer]
-    pub fn new(deployer: Deployer<M>) -> Self {
-        Self { deployer, _contract: Default::default() }
+impl<B, M, C> From<Deployer<B, M>> for ContractDeploymentTx<B, M, C> {
+    fn from(deployer: Deployer<B, M>) -> Self {
+        Self { deployer, _contract: PhantomData }
+    }
+}
+
+impl<B, M, C> ContractDeploymentTx<B, M, C>
+where
+    B: Borrow<M> + Clone,
+    M: Middleware,
+    C: From<ContractInstance<B, M>>,
+{
+    /// Create a new instance of this from a deployer.
+    pub fn new(deployer: Deployer<B, M>) -> Self {
+        Self { deployer, _contract: PhantomData }
     }
 
     /// Sets the number of confirmations to wait for the contract deployment transaction
@@ -50,6 +79,7 @@ impl<M: Middleware, C: From<Contract<M>>> ContractDeployer<M, C> {
         self
     }
 
+    /// Sets the block at which RPC requests are made
     pub fn block<T: Into<BlockNumber>>(mut self, block: T) -> Self {
         self.deployer.block = block.into();
         self
@@ -136,7 +166,7 @@ impl<M: Middleware, C: From<Contract<M>>> ContractDeployer<M, C> {
     /// Broadcasts the contract deployment transaction and after waiting for it to
     /// be sufficiently confirmed (default: 1), it returns a new instance of the contract type at
     /// the deployed contract's address and the corresponding
-    /// [`TransactionReceipt`](ethers_core::types::TransactionReceipt).
+    /// [`TransactionReceipt`].
     pub async fn send_with_receipt(self) -> Result<(C, TransactionReceipt), ContractError<M>> {
         let (contract, receipt) = self.deployer.send_with_receipt().await?;
         Ok((C::from(contract), receipt))
@@ -148,7 +178,7 @@ impl<M: Middleware, C: From<Contract<M>>> ContractDeployer<M, C> {
     }
 
     /// Returns a pointer to the deployer's client
-    pub fn client(&self) -> Arc<M> {
+    pub fn client(&self) -> &M {
         self.deployer.client()
     }
 }
@@ -156,16 +186,20 @@ impl<M: Middleware, C: From<Contract<M>>> ContractDeployer<M, C> {
 /// Helper which manages the deployment transaction of a smart contract
 #[derive(Debug)]
 #[must_use = "Deployer does nothing unless you `send` it"]
-pub struct Deployer<M> {
+pub struct Deployer<B, M> {
     /// The deployer's transaction, exposed for overriding the defaults
     pub tx: TypedTransaction,
     abi: Abi,
-    client: Arc<M>,
+    client: B,
     confs: usize,
     block: BlockNumber,
+    _m: PhantomData<M>,
 }
 
-impl<M> Clone for Deployer<M> {
+impl<B, M> Clone for Deployer<B, M>
+where
+    B: Clone,
+{
     fn clone(&self) -> Self {
         Deployer {
             tx: self.tx.clone(),
@@ -173,17 +207,23 @@ impl<M> Clone for Deployer<M> {
             client: self.client.clone(),
             confs: self.confs,
             block: self.block,
+            _m: PhantomData,
         }
     }
 }
 
-impl<M: Middleware> Deployer<M> {
+impl<B, M> Deployer<B, M>
+where
+    B: Borrow<M> + Clone,
+    M: Middleware,
+{
     /// Sets the number of confirmations to wait for the contract deployment transaction
     pub fn confirmations<T: Into<usize>>(mut self, confirmations: T) -> Self {
         self.confs = confirmations.into();
         self
     }
 
+    /// Set the block at which requests are made
     pub fn block<T: Into<BlockNumber>>(mut self, block: T) -> Self {
         self.block = block.into();
         self
@@ -206,9 +246,10 @@ impl<M: Middleware> Deployer<M> {
     /// Note: this function _does not_ send a transaction from your account
     pub async fn call(&self) -> Result<(), ContractError<M>> {
         self.client
+            .borrow()
             .call(&self.tx, Some(self.block.into()))
             .await
-            .map_err(ContractError::MiddlewareError)?;
+            .map_err(ContractError::from_middleware_error)?;
 
         // TODO: It would be nice to handle reverts in a structured way.
         Ok(())
@@ -220,13 +261,13 @@ impl<M: Middleware> Deployer<M> {
     ///
     /// Note: this function _does not_ send a transaction from your account
     pub fn call_raw(&self) -> CallBuilder<'_, M::Provider> {
-        self.client.provider().call_raw(&self.tx).block(self.block.into())
+        self.client.borrow().provider().call_raw(&self.tx).block(self.block.into())
     }
 
     /// Broadcasts the contract deployment transaction and after waiting for it to
     /// be sufficiently confirmed (default: 1), it returns a [`Contract`](crate::Contract)
     /// struct at the deployed contract's address.
-    pub async fn send(self) -> Result<Contract<M>, ContractError<M>> {
+    pub async fn send(self) -> Result<ContractInstance<B, M>, ContractError<M>> {
         let (contract, _) = self.send_with_receipt().await?;
         Ok(contract)
     }
@@ -234,25 +275,27 @@ impl<M: Middleware> Deployer<M> {
     /// Broadcasts the contract deployment transaction and after waiting for it to
     /// be sufficiently confirmed (default: 1), it returns a tuple with
     /// the [`Contract`](crate::Contract) struct at the deployed contract's address
-    /// and the corresponding [`TransactionReceipt`](ethers_core::types::TransactionReceipt).
+    /// and the corresponding [`TransactionReceipt`].
     pub async fn send_with_receipt(
         self,
-    ) -> Result<(Contract<M>, TransactionReceipt), ContractError<M>> {
+    ) -> Result<(ContractInstance<B, M>, TransactionReceipt), ContractError<M>> {
         let pending_tx = self
             .client
+            .borrow()
             .send_transaction(self.tx, Some(self.block.into()))
             .await
-            .map_err(ContractError::MiddlewareError)?;
+            .map_err(ContractError::from_middleware_error)?;
 
         // TODO: Should this be calculated "optimistically" by address/nonce?
         let receipt = pending_tx
             .confirmations(self.confs)
             .await
-            .map_err(|_| ContractError::ContractNotDeployed)?
+            .ok()
+            .flatten()
             .ok_or(ContractError::ContractNotDeployed)?;
         let address = receipt.contract_address.ok_or(ContractError::ContractNotDeployed)?;
 
-        let contract = Contract::new(address, self.abi.clone(), self.client);
+        let contract = ContractInstance::new(address, self.abi, self.client);
         Ok((contract, receipt))
     }
 
@@ -262,8 +305,8 @@ impl<M: Middleware> Deployer<M> {
     }
 
     /// Returns a pointer to the deployer's client
-    pub fn client(&self) -> Arc<M> {
-        self.client.clone()
+    pub fn client(&self) -> &M {
+        self.client.borrow()
     }
 }
 
@@ -277,26 +320,21 @@ impl<M: Middleware> Deployer<M> {
 /// # Example
 ///
 /// ```no_run
-/// use ethers_solc::Solc;
 /// use ethers_contract::ContractFactory;
+/// use ethers_core::types::Bytes;
 /// use ethers_providers::{Provider, Http};
-/// use ethers_signers::Wallet;
-/// use std::convert::TryFrom;
 ///
 /// # async fn foo() -> Result<(), Box<dyn std::error::Error>> {
-/// // first we'll compile the contract (you can alternatively compile it yourself
-/// // and pass the ABI/Bytecode
-/// let compiled = Solc::default().compile_source("./tests/contract.sol").unwrap();
-/// let contract = compiled
-///     .get("./tests/contract.sol", "SimpleStorage")
-///     .expect("could not find contract");
+/// // get the contract ABI and bytecode
+/// let abi = Default::default();
+/// let bytecode = Bytes::from_static(b"...");
 ///
 /// // connect to the network
 /// let client = Provider::<Http>::try_from("http://localhost:8545").unwrap();
 /// let client = std::sync::Arc::new(client);
 ///
 /// // create a factory which will be used to deploy instances of the contract
-/// let factory = ContractFactory::new(contract.abi.unwrap().clone(), contract.bytecode().unwrap().clone(), client);
+/// let factory = ContractFactory::new(abi, bytecode, client);
 ///
 /// // The deployer created by the `deploy` call exposes a builder which gets consumed
 /// // by the async `send` call
@@ -309,31 +347,45 @@ impl<M: Middleware> Deployer<M> {
 /// # Ok(())
 /// # }
 #[derive(Debug)]
-pub struct ContractFactory<M> {
-    client: Arc<M>,
+pub struct DeploymentTxFactory<B, M> {
+    client: B,
     abi: Abi,
     bytecode: Bytes,
+    _m: PhantomData<M>,
 }
 
-impl<M> Clone for ContractFactory<M> {
+impl<B, M> Clone for DeploymentTxFactory<B, M>
+where
+    B: Clone,
+{
     fn clone(&self) -> Self {
-        ContractFactory {
+        DeploymentTxFactory {
             client: self.client.clone(),
             abi: self.abi.clone(),
             bytecode: self.bytecode.clone(),
+            _m: PhantomData,
         }
     }
 }
 
-impl<M: Middleware> ContractFactory<M> {
+impl<B, M> DeploymentTxFactory<B, M>
+where
+    B: Borrow<M> + Clone,
+    M: Middleware,
+{
     /// Creates a factory for deployment of the Contract with bytecode, and the
     /// constructor defined in the abi. The client will be used to send any deployment
     /// transaction.
-    pub fn new(abi: Abi, bytecode: Bytes, client: Arc<M>) -> Self {
-        Self { client, abi, bytecode }
+    pub fn new(abi: Abi, bytecode: Bytes, client: B) -> Self {
+        Self { client, abi, bytecode, _m: PhantomData }
     }
 
-    pub fn deploy_tokens(self, params: Vec<Token>) -> Result<Deployer<M>, ContractError<M>> {
+    /// Create a deployment tx using the provided tokens as constructor
+    /// arguments
+    pub fn deploy_tokens(self, params: Vec<Token>) -> Result<Deployer<B, M>, ContractError<M>>
+    where
+        B: Clone,
+    {
         // Encode the constructor args & concatenate with the bytecode if necessary
         let data: Bytes = match (self.abi.constructor(), params.is_empty()) {
             (None, false) => return Err(ContractError::ConstructorError),
@@ -353,11 +405,12 @@ impl<M: Middleware> ContractFactory<M> {
         let tx = tx.into();
 
         Ok(Deployer {
-            client: Arc::clone(&self.client), // cheap clone behind the arc
+            client: self.client.clone(),
             abi: self.abi,
             tx,
             confs: 1,
             block: BlockNumber::Latest,
+            _m: PhantomData,
         })
     }
 
@@ -369,7 +422,10 @@ impl<M: Middleware> ContractFactory<M> {
     /// 1. If there are no constructor arguments, you should pass `()` as the argument.
     /// 1. The default poll duration is 7 seconds.
     /// 1. The default number of confirmations is 1 block.
-    pub fn deploy<T: Tokenize>(self, constructor_args: T) -> Result<Deployer<M>, ContractError<M>> {
+    pub fn deploy<T: Tokenize>(
+        self,
+        constructor_args: T,
+    ) -> Result<Deployer<B, M>, ContractError<M>> {
         self.deploy_tokens(constructor_args.into_tokens())
     }
 }

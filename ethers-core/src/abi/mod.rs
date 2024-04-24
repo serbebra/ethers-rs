@@ -1,7 +1,9 @@
-//! This module implements extensions to the [`ethabi`](https://docs.rs/ethabi) API.
-// Adapted from [Gnosis' ethcontract](https://github.com/gnosis/ethcontract-rs/blob/master/common/src/abiext.rs)
+//! Extensions to the [`ethabi`](https://docs.rs/ethabi) API.
+//!
+//! Adapted from [Gnosis' `ethcontract-rs`](https://github.com/gnosis/ethcontract-rs).
+
 use crate::{
-    types::{Bytes, Selector, Uint8, H256, H512, I256, U128, U256, U64},
+    types::{self, Selector, Uint8, H256, H512, I256, U128, U256, U64},
     utils::id,
 };
 pub use ethabi::{self, Contract as Abi, *};
@@ -25,6 +27,9 @@ pub use human_readable::{
 
 mod raw;
 pub use raw::{AbiObject, Component, Item, JsonAbi, RawAbi};
+
+mod packed;
+pub use packed::{encode_packed, EncodePackedError};
 
 mod sealed {
     use ethabi::{Event, Function};
@@ -103,10 +108,32 @@ impl ErrorExt for ethabi::AbiError {
     }
 }
 
-/// A trait for types that can be represented in the ethereum ABI.
+/// A trait for types that can be represented in the Ethereum ABI.
 pub trait AbiType {
     /// The native ABI type this type represents.
     fn param_type() -> ParamType;
+
+    /// A hint of the minimum number of bytes this type takes up in the ABI.
+    fn minimum_size() -> usize {
+        minimum_size(&Self::param_type())
+    }
+}
+
+/// Returns the minimum number of bytes that `ty` takes up in the ABI.
+pub fn minimum_size(ty: &ParamType) -> usize {
+    match ty {
+        // 1 word
+        ParamType::Uint(_) |
+        ParamType::Int(_) |
+        ParamType::Bool |
+        ParamType::Address |
+        ParamType::FixedBytes(_) => 32,
+        // min 2 words (offset, length)
+        ParamType::Bytes | ParamType::String | ParamType::Array(_) => 64,
+        // sum of all elements
+        ParamType::FixedArray(ty, len) => minimum_size(ty) * len,
+        ParamType::Tuple(tys) => tys.iter().map(minimum_size).sum(),
+    }
 }
 
 impl AbiType for u8 {
@@ -157,7 +184,7 @@ macro_rules! impl_abi_type {
 }
 
 impl_abi_type!(
-    Bytes => Bytes,
+    types::Bytes => Bytes,
     bytes::Bytes => Bytes,
     Vec<u8> =>  Array(Box::new(ParamType::Uint(8))),
     Address => Address,
@@ -191,7 +218,7 @@ impl<'a> AbiType for &'a str {
 impl<'a> AbiArrayType for &'a str {}
 
 macro_rules! impl_abi_type_tuple {
-    ($num: expr, $( $ty: ident),+) => {
+    ($( $ty: ident),+) => {
         impl<$($ty, )+> AbiType for ($($ty,)+) where
             $(
                 $ty: AbiType,
@@ -215,28 +242,29 @@ macro_rules! impl_abi_type_tuple {
     }
 }
 
-impl_abi_type_tuple!(1, A);
-impl_abi_type_tuple!(2, A, B);
-impl_abi_type_tuple!(3, A, B, C);
-impl_abi_type_tuple!(4, A, B, C, D);
-impl_abi_type_tuple!(5, A, B, C, D, E);
-impl_abi_type_tuple!(6, A, B, C, D, E, F);
-impl_abi_type_tuple!(7, A, B, C, D, E, F, G);
-impl_abi_type_tuple!(8, A, B, C, D, E, F, G, H);
-impl_abi_type_tuple!(9, A, B, C, D, E, F, G, H, I);
-impl_abi_type_tuple!(10, A, B, C, D, E, F, G, H, I, J);
-impl_abi_type_tuple!(11, A, B, C, D, E, F, G, H, I, J, K);
-impl_abi_type_tuple!(12, A, B, C, D, E, F, G, H, I, J, K, L);
-impl_abi_type_tuple!(13, A, B, C, D, E, F, G, H, I, J, K, L, M);
-impl_abi_type_tuple!(14, A, B, C, D, E, F, G, H, I, J, K, L, M, N);
-impl_abi_type_tuple!(15, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
-impl_abi_type_tuple!(16, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
-impl_abi_type_tuple!(17, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q);
-impl_abi_type_tuple!(18, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R);
-impl_abi_type_tuple!(19, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S);
-impl_abi_type_tuple!(20, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T);
-impl_abi_type_tuple!(21, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U);
+impl_abi_type_tuple!(A);
+impl_abi_type_tuple!(A, B);
+impl_abi_type_tuple!(A, B, C);
+impl_abi_type_tuple!(A, B, C, D);
+impl_abi_type_tuple!(A, B, C, D, E);
+impl_abi_type_tuple!(A, B, C, D, E, F);
+impl_abi_type_tuple!(A, B, C, D, E, F, G);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T);
+impl_abi_type_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U);
 
+#[allow(clippy::extra_unused_type_parameters)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,9 +317,9 @@ mod tests {
 
     #[test]
     fn abi_type_works() {
-        assert_eq!(ParamType::Bytes, Bytes::param_type());
+        assert_eq!(ParamType::Bytes, types::Bytes::param_type());
         assert_eq!(ParamType::Array(Box::new(ParamType::Uint(8))), Vec::<u8>::param_type());
-        assert_eq!(ParamType::Array(Box::new(ParamType::Bytes)), Vec::<Bytes>::param_type());
+        assert_eq!(ParamType::Array(Box::new(ParamType::Bytes)), Vec::<types::Bytes>::param_type());
         assert_eq!(
             ParamType::Array(Box::new(ParamType::Array(Box::new(ParamType::Uint(8))))),
             Vec::<Vec<u8>>::param_type()
@@ -307,7 +335,7 @@ mod tests {
 
         assert_eq!(
             ParamType::Tuple(vec![ParamType::Bytes, ParamType::Address]),
-            <(Bytes, Address)>::param_type()
+            <(types::Bytes, Address)>::param_type()
         );
 
         assert_eq!(ParamType::FixedBytes(32), <[u8; 32]>::param_type());

@@ -1,6 +1,6 @@
 use crate::{
     source_tree::{SourceTree, SourceTreeEntry},
-    utils::{deserialize_address_opt, deserialize_stringified_source_code},
+    utils::{deserialize_address_opt, deserialize_source_code},
     Client, EtherscanError, Response, Result,
 };
 use ethers_core::{
@@ -36,6 +36,9 @@ impl<T: Into<String>> From<T> for SourceCodeEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SourceCodeMetadata {
+    /// Contains just mapped source code.
+    // NOTE: this must come before `Metadata`
+    Sources(HashMap<String, SourceCodeEntry>),
     /// Contains metadata and path mapped source code.
     Metadata {
         /// Programming language of the sources.
@@ -58,6 +61,9 @@ impl SourceCodeMetadata {
             Self::Metadata { sources, .. } => {
                 sources.values().map(|s| s.content.clone()).collect::<Vec<_>>().join("\n")
             }
+            Self::Sources(sources) => {
+                sources.values().map(|s| s.content.clone()).collect::<Vec<_>>().join("\n")
+            }
             Self::SourceCode(s) => s.clone(),
         }
     }
@@ -65,6 +71,7 @@ impl SourceCodeMetadata {
     pub fn language(&self) -> Option<SourceCodeLanguage> {
         match self {
             Self::Metadata { language, .. } => language.clone(),
+            Self::Sources(_) => None,
             Self::SourceCode(_) => None,
         }
     }
@@ -72,6 +79,7 @@ impl SourceCodeMetadata {
     pub fn sources(&self) -> HashMap<String, SourceCodeEntry> {
         match self {
             Self::Metadata { sources, .. } => sources.clone(),
+            Self::Sources(sources) => sources.clone(),
             Self::SourceCode(s) => HashMap::from([("Contract".into(), s.into())]),
         }
     }
@@ -89,6 +97,7 @@ impl SourceCodeMetadata {
                 }
                 None => Ok(None),
             },
+            Self::Sources(_) => Ok(None),
             Self::SourceCode(_) => Ok(None),
         }
     }
@@ -97,6 +106,7 @@ impl SourceCodeMetadata {
     pub fn settings(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Metadata { settings, .. } => settings.as_ref(),
+            Self::Sources(_) => None,
             Self::SourceCode(_) => None,
         }
     }
@@ -107,7 +117,7 @@ impl SourceCodeMetadata {
 #[serde(rename_all = "PascalCase")]
 pub struct Metadata {
     /// Includes metadata for compiler settings and language.
-    #[serde(deserialize_with = "deserialize_stringified_source_code")]
+    #[serde(deserialize_with = "deserialize_source_code")]
     pub source_code: SourceCodeMetadata,
 
     /// The ABI of the contract.
@@ -148,7 +158,11 @@ pub struct Metadata {
     pub proxy: u64,
 
     /// If this contract is a proxy, the address of its implementation.
-    #[serde(deserialize_with = "deserialize_address_opt")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_address_opt"
+    )]
     pub implementation: Option<Address>,
 
     /// The swarm source of the contract.
@@ -308,16 +322,10 @@ impl Client {
     /// # Example
     ///
     /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let abi = client
-    ///         .contract_abi("0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse().unwrap())
-    ///         .await.unwrap();
-    /// # }
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse()?;
+    /// let abi = client.contract_abi(address).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn contract_abi(&self, address: Address) -> Result<Abi> {
         // apply caching
@@ -333,17 +341,34 @@ impl Client {
         }
 
         let query = self.create_query("contract", "getabi", HashMap::from([("address", address)]));
-        let resp: Response<String> = self.get_json(&query).await?;
-        if resp.result.starts_with("Max rate limit reached") {
+        let resp: Response<Option<String>> = self.get_json(&query).await?;
+
+        let result = match resp.result {
+            Some(result) => result,
+            None => {
+                if resp.message.contains("Contract source code not verified") {
+                    return Err(EtherscanError::ContractCodeNotVerified(address))
+                }
+                return Err(EtherscanError::EmptyResult {
+                    message: resp.message,
+                    status: resp.status,
+                })
+            }
+        };
+
+        if result.starts_with("Max rate limit reached") {
             return Err(EtherscanError::RateLimitExceeded)
         }
-        if resp.result.starts_with("Contract source code not verified") {
+
+        if result.starts_with("Contract source code not verified") ||
+            resp.message.starts_with("Contract source code not verified")
+        {
             if let Some(ref cache) = self.cache {
                 cache.set_abi(address, None);
             }
             return Err(EtherscanError::ContractCodeNotVerified(address))
         }
-        let abi = serde_json::from_str(&resp.result)?;
+        let abi = serde_json::from_str(&result)?;
 
         if let Some(ref cache) = self.cache {
             cache.set_abi(address, Some(&abi));
@@ -357,17 +382,11 @@ impl Client {
     /// # Example
     ///
     /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let meta = client
-    ///         .contract_source_code("0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse().unwrap())
-    ///         .await.unwrap();
-    ///     let code = meta.source_code();
-    /// # }
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse()?;
+    /// let metadata = client.contract_source_code(address).await?;
+    /// assert_eq!(metadata.items[0].contract_name, "DAO");
+    /// # Ok(()) }
     /// ```
     pub async fn contract_source_code(&self, address: Address) -> Result<ContractMetadata> {
         // apply caching
@@ -402,139 +421,5 @@ impl Client {
         }
 
         Ok(result)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tests::run_at_least_duration;
-    use ethers_core::types::Chain;
-    use serial_test::serial;
-    use std::time::Duration;
-
-    /// Abi of [0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413](https://api.etherscan.io/api?module=contract&action=getsourcecode&address=0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413).
-    const DAO_ABI: &str = "[{\"constant\":true,\"inputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"name\":\"proposals\",\"outputs\":[{\"name\":\"recipient\",\"type\":\"address\"},{\"name\":\"amount\",\"type\":\"uint256\"},{\"name\":\"description\",\"type\":\"string\"},{\"name\":\"votingDeadline\",\"type\":\"uint256\"},{\"name\":\"open\",\"type\":\"bool\"},{\"name\":\"proposalPassed\",\"type\":\"bool\"},{\"name\":\"proposalHash\",\"type\":\"bytes32\"},{\"name\":\"proposalDeposit\",\"type\":\"uint256\"},{\"name\":\"newCurator\",\"type\":\"bool\"},{\"name\":\"yea\",\"type\":\"uint256\"},{\"name\":\"nay\",\"type\":\"uint256\"},{\"name\":\"creator\",\"type\":\"address\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_spender\",\"type\":\"address\"},{\"name\":\"_amount\",\"type\":\"uint256\"}],\"name\":\"approve\",\"outputs\":[{\"name\":\"success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"minTokensToCreate\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"rewardAccount\",\"outputs\":[{\"name\":\"\",\"type\":\"address\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"daoCreator\",\"outputs\":[{\"name\":\"\",\"type\":\"address\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"totalSupply\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"divisor\",\"outputs\":[{\"name\":\"divisor\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"extraBalance\",\"outputs\":[{\"name\":\"\",\"type\":\"address\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_proposalID\",\"type\":\"uint256\"},{\"name\":\"_transactionData\",\"type\":\"bytes\"}],\"name\":\"executeProposal\",\"outputs\":[{\"name\":\"_success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_from\",\"type\":\"address\"},{\"name\":\"_to\",\"type\":\"address\"},{\"name\":\"_value\",\"type\":\"uint256\"}],\"name\":\"transferFrom\",\"outputs\":[{\"name\":\"success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[],\"name\":\"unblockMe\",\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"totalRewardToken\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"actualBalance\",\"outputs\":[{\"name\":\"_actualBalance\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"closingTime\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"\",\"type\":\"address\"}],\"name\":\"allowedRecipients\",\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_to\",\"type\":\"address\"},{\"name\":\"_value\",\"type\":\"uint256\"}],\"name\":\"transferWithoutReward\",\"outputs\":[{\"name\":\"success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[],\"name\":\"refund\",\"outputs\":[],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_recipient\",\"type\":\"address\"},{\"name\":\"_amount\",\"type\":\"uint256\"},{\"name\":\"_description\",\"type\":\"string\"},{\"name\":\"_transactionData\",\"type\":\"bytes\"},{\"name\":\"_debatingPeriod\",\"type\":\"uint256\"},{\"name\":\"_newCurator\",\"type\":\"bool\"}],\"name\":\"newProposal\",\"outputs\":[{\"name\":\"_proposalID\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"\",\"type\":\"address\"}],\"name\":\"DAOpaidOut\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"minQuorumDivisor\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_newContract\",\"type\":\"address\"}],\"name\":\"newContract\",\"outputs\":[],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"_owner\",\"type\":\"address\"}],\"name\":\"balanceOf\",\"outputs\":[{\"name\":\"balance\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_recipient\",\"type\":\"address\"},{\"name\":\"_allowed\",\"type\":\"bool\"}],\"name\":\"changeAllowedRecipients\",\"outputs\":[{\"name\":\"_success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[],\"name\":\"halveMinQuorum\",\"outputs\":[{\"name\":\"_success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"\",\"type\":\"address\"}],\"name\":\"paidOut\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_proposalID\",\"type\":\"uint256\"},{\"name\":\"_newCurator\",\"type\":\"address\"}],\"name\":\"splitDAO\",\"outputs\":[{\"name\":\"_success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"DAOrewardAccount\",\"outputs\":[{\"name\":\"\",\"type\":\"address\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"proposalDeposit\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"numberOfProposals\",\"outputs\":[{\"name\":\"_numberOfProposals\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"lastTimeMinQuorumMet\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_toMembers\",\"type\":\"bool\"}],\"name\":\"retrieveDAOReward\",\"outputs\":[{\"name\":\"_success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[],\"name\":\"receiveEther\",\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_to\",\"type\":\"address\"},{\"name\":\"_value\",\"type\":\"uint256\"}],\"name\":\"transfer\",\"outputs\":[{\"name\":\"success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"isFueled\",\"outputs\":[{\"name\":\"\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_tokenHolder\",\"type\":\"address\"}],\"name\":\"createTokenProxy\",\"outputs\":[{\"name\":\"success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"_proposalID\",\"type\":\"uint256\"}],\"name\":\"getNewDAOAddress\",\"outputs\":[{\"name\":\"_newDAO\",\"type\":\"address\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_proposalID\",\"type\":\"uint256\"},{\"name\":\"_supportsProposal\",\"type\":\"bool\"}],\"name\":\"vote\",\"outputs\":[{\"name\":\"_voteID\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[],\"name\":\"getMyReward\",\"outputs\":[{\"name\":\"_success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"\",\"type\":\"address\"}],\"name\":\"rewardToken\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_from\",\"type\":\"address\"},{\"name\":\"_to\",\"type\":\"address\"},{\"name\":\"_value\",\"type\":\"uint256\"}],\"name\":\"transferFromWithoutReward\",\"outputs\":[{\"name\":\"success\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"_owner\",\"type\":\"address\"},{\"name\":\"_spender\",\"type\":\"address\"}],\"name\":\"allowance\",\"outputs\":[{\"name\":\"remaining\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":false,\"inputs\":[{\"name\":\"_proposalDeposit\",\"type\":\"uint256\"}],\"name\":\"changeProposalDeposit\",\"outputs\":[],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"\",\"type\":\"address\"}],\"name\":\"blocked\",\"outputs\":[{\"name\":\"\",\"type\":\"uint256\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"curator\",\"outputs\":[{\"name\":\"\",\"type\":\"address\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[{\"name\":\"_proposalID\",\"type\":\"uint256\"},{\"name\":\"_recipient\",\"type\":\"address\"},{\"name\":\"_amount\",\"type\":\"uint256\"},{\"name\":\"_transactionData\",\"type\":\"bytes\"}],\"name\":\"checkProposalCode\",\"outputs\":[{\"name\":\"_codeChecksOut\",\"type\":\"bool\"}],\"type\":\"function\"},{\"constant\":true,\"inputs\":[],\"name\":\"privateCreation\",\"outputs\":[{\"name\":\"\",\"type\":\"address\"}],\"type\":\"function\"},{\"inputs\":[{\"name\":\"_curator\",\"type\":\"address\"},{\"name\":\"_daoCreator\",\"type\":\"address\"},{\"name\":\"_proposalDeposit\",\"type\":\"uint256\"},{\"name\":\"_minTokensToCreate\",\"type\":\"uint256\"},{\"name\":\"_closingTime\",\"type\":\"uint256\"},{\"name\":\"_privateCreation\",\"type\":\"address\"}],\"type\":\"constructor\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"_from\",\"type\":\"address\"},{\"indexed\":true,\"name\":\"_to\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"_amount\",\"type\":\"uint256\"}],\"name\":\"Transfer\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"_owner\",\"type\":\"address\"},{\"indexed\":true,\"name\":\"_spender\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"_amount\",\"type\":\"uint256\"}],\"name\":\"Approval\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":false,\"name\":\"value\",\"type\":\"uint256\"}],\"name\":\"FuelingToDate\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"to\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"CreatedToken\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"to\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"value\",\"type\":\"uint256\"}],\"name\":\"Refund\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"proposalID\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"recipient\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"amount\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"newCurator\",\"type\":\"bool\"},{\"indexed\":false,\"name\":\"description\",\"type\":\"string\"}],\"name\":\"ProposalAdded\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"proposalID\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"position\",\"type\":\"bool\"},{\"indexed\":true,\"name\":\"voter\",\"type\":\"address\"}],\"name\":\"Voted\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"proposalID\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"result\",\"type\":\"bool\"},{\"indexed\":false,\"name\":\"quorum\",\"type\":\"uint256\"}],\"name\":\"ProposalTallied\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"_newCurator\",\"type\":\"address\"}],\"name\":\"NewCurator\",\"type\":\"event\"},{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"_recipient\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"_allowed\",\"type\":\"bool\"}],\"name\":\"AllowedRecipientChanged\",\"type\":\"event\"}]";
-
-    #[allow(unused)]
-    fn init_tracing() {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .init();
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[ignore]
-    async fn can_fetch_ftm_contract_abi() {
-        init_tracing();
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Fantom).unwrap();
-
-            let _abi = client
-                .contract_abi("0x80AA7cb0006d5DDD91cce684229Ac6e398864606".parse().unwrap())
-                .await
-                .unwrap();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[ignore]
-    async fn can_fetch_contract_abi() {
-        init_tracing();
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let abi = client
-                .contract_abi("0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse().unwrap())
-                .await
-                .unwrap();
-            assert_eq!(abi, serde_json::from_str(DAO_ABI).unwrap());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[ignore]
-    async fn can_fetch_contract_source_code() {
-        init_tracing();
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let meta = client
-                .contract_source_code("0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse().unwrap())
-                .await
-                .unwrap();
-
-            assert_eq!(meta.items.len(), 1);
-            let item = &meta.items[0];
-            assert!(matches!(item.source_code, SourceCodeMetadata::SourceCode(_)));
-            assert_eq!(item.source_code.sources().len(), 1);
-            assert_eq!(item.abi().unwrap(), serde_json::from_str(DAO_ABI).unwrap());
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    #[ignore]
-    async fn can_get_error_on_unverified_contract() {
-        init_tracing();
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-            let addr = "0xb5c31a0e22cae98ac08233e512bd627885aa24e5".parse().unwrap();
-            let err = client.contract_source_code(addr).await.unwrap_err();
-            assert!(matches!(err, EtherscanError::ContractCodeNotVerified(_)));
-        })
-        .await
-    }
-
-    /// Query a contract that has a single string source entry instead of underlying JSON metadata.
-    #[tokio::test]
-    #[serial]
-    #[ignore]
-    async fn can_fetch_contract_source_tree_for_singleton_contract() {
-        init_tracing();
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let meta = client
-                .contract_source_code("0xBB9bc244D798123fDe783fCc1C72d3Bb8C189413".parse().unwrap())
-                .await
-                .unwrap();
-
-            assert_eq!(meta.items.len(), 1);
-            let item = &meta.items[0];
-            assert!(matches!(item.source_code, SourceCodeMetadata::SourceCode(_)));
-            assert_eq!(item.source_code.sources().len(), 1);
-            assert_eq!(item.abi().unwrap(), serde_json::from_str(DAO_ABI).unwrap());
-        })
-        .await
-    }
-
-    /// Query a contract that has many source entries as JSON metadata and ensure they are
-    /// reflected.
-    #[tokio::test]
-    #[serial]
-    #[ignore]
-    async fn can_fetch_contract_source_tree_for_multi_entry_contract() {
-        init_tracing();
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let meta = client
-                .contract_source_code("0x8d04a8c79cEB0889Bdd12acdF3Fa9D207eD3Ff63".parse().unwrap())
-                .await
-                .unwrap();
-
-            assert_eq!(meta.items.len(), 1);
-            assert!(matches!(meta.items[0].source_code, SourceCodeMetadata::Metadata { .. }));
-            let source_tree = meta.source_tree();
-            assert_eq!(source_tree.entries.len(), 15);
-        })
-        .await
     }
 }

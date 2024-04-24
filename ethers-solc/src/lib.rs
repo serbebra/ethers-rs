@@ -1,5 +1,6 @@
+#![doc = include_str!("../README.md")]
 #![deny(rustdoc::broken_intra_doc_links)]
-#![allow(rustdoc::private_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 pub mod artifacts;
 pub mod sourcemap;
@@ -24,7 +25,7 @@ pub use compile::{
 };
 
 mod config;
-pub use config::{AllowedLibPaths, PathStyle, ProjectPathsConfig, SolcConfig};
+pub use config::{AllowedLibPaths, PathStyle, ProjectPaths, ProjectPathsConfig, SolcConfig};
 
 pub mod remappings;
 use crate::artifacts::{Source, SourceFile, StandardJsonCompilerInput};
@@ -267,7 +268,7 @@ impl<T: ArtifactOutput> Project<T> {
         let sources = self.paths.read_input_files()?;
         tracing::trace!("found {} sources to compile: {:?}", sources.len(), sources.keys());
 
-        #[cfg(all(feature = "svm-solc"))]
+        #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
         if self.auto_detect {
             tracing::trace!("using solc auto detection to compile sources");
             return self.svm_compile(sources)
@@ -280,7 +281,7 @@ impl<T: ArtifactOutput> Project<T> {
     ///
     /// This will autodetect the appropriate `Solc` version(s) to use when compiling the provided
     /// `Sources`. Solc auto-detection follows semver rules, see also
-    /// [`crate::resolver::Graph::get_input_node_versions()`]
+    /// `Graph::get_input_node_versions`
     ///
     /// # Errors
     ///
@@ -299,7 +300,7 @@ impl<T: ArtifactOutput> Project<T> {
     /// let output = project.svm_compile(sources).unwrap();
     /// # }
     /// ```
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn svm_compile(&self, sources: Sources) -> Result<ProjectCompileOutput<T>> {
         project::ProjectCompiler::with_sources(self, sources)?.compile()
     }
@@ -316,7 +317,7 @@ impl<T: ArtifactOutput> Project<T> {
     /// let output = project.compile_file("example/Greeter.sol").unwrap();
     /// # }
     /// ```
-    #[cfg(all(feature = "svm-solc"))]
+    #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
     pub fn compile_file(&self, file: impl Into<PathBuf>) -> Result<ProjectCompileOutput<T>> {
         let file = file.into();
         let source = Source::read(&file)?;
@@ -345,7 +346,7 @@ impl<T: ArtifactOutput> Project<T> {
     {
         let sources = Source::read_all(files)?;
 
-        #[cfg(all(feature = "svm-solc"))]
+        #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
         if self.auto_detect {
             return project::ProjectCompiler::with_sources(self, sources)?.compile()
         }
@@ -392,7 +393,7 @@ impl<T: ArtifactOutput> Project<T> {
             Source::read_all(self.paths.input_files().into_iter().filter(|p| filter.is_match(p)))?;
         let filter: Box<dyn FileFilter> = Box::new(filter);
 
-        #[cfg(all(feature = "svm-solc"))]
+        #[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
         if self.auto_detect {
             return project::ProjectCompiler::with_sources(self, sources)?
                 .with_sparse_output(filter)
@@ -473,11 +474,18 @@ impl<T: ArtifactOutput> Project<T> {
             }
             tracing::trace!("removed cache file \"{}\"", self.cache_path().display());
         }
-        if self.paths.artifacts.exists() {
+        if self.artifacts_path().exists() {
             std::fs::remove_dir_all(self.artifacts_path())
                 .map_err(|err| SolcIoError::new(err, self.artifacts_path().clone()))?;
             tracing::trace!("removed artifacts dir \"{}\"", self.artifacts_path().display());
         }
+
+        if self.build_info_path().exists() {
+            std::fs::remove_dir_all(self.build_info_path())
+                .map_err(|err| SolcIoError::new(err, self.build_info_path().clone()))?;
+            tracing::trace!("removed build-info dir \"{}\"", self.build_info_path().display());
+        }
+
         Ok(())
     }
 
@@ -963,31 +971,26 @@ impl<T: ArtifactOutput> ArtifactOutput for Project<T> {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "svm-solc"))]
+#[cfg(all(feature = "svm-solc", not(target_arch = "wasm32")))]
 mod tests {
+    use super::*;
     use crate::remappings::Remapping;
 
     #[test]
     fn test_build_all_versions() {
-        use super::*;
-
         let paths = ProjectPathsConfig::builder()
             .root("./test-data/test-contract-versions")
             .sources("./test-data/test-contract-versions")
             .build()
             .unwrap();
         let project = Project::builder().paths(paths).no_artifacts().ephemeral().build().unwrap();
-        let compiled = project.compile().unwrap();
-        assert!(!compiled.has_compiler_errors());
-        let contracts = compiled.output().contracts;
+        let contracts = project.compile().unwrap().succeeded().output().contracts;
         // Contracts A to F
         assert_eq!(contracts.contracts().count(), 5);
     }
 
     #[test]
     fn test_build_many_libs() {
-        use super::*;
-
         let root = utils::canonicalize("./test-data/test-contract-libs").unwrap();
 
         let paths = ProjectPathsConfig::builder()
@@ -1009,16 +1012,12 @@ mod tests {
             .no_artifacts()
             .build()
             .unwrap();
-        let compiled = project.compile().unwrap();
-        assert!(!compiled.has_compiler_errors());
-        let contracts = compiled.output().contracts;
+        let contracts = project.compile().unwrap().succeeded().output().contracts;
         assert_eq!(contracts.contracts().count(), 3);
     }
 
     #[test]
     fn test_build_remappings() {
-        use super::*;
-
         let root = utils::canonicalize("./test-data/test-contract-remappings").unwrap();
         let paths = ProjectPathsConfig::builder()
             .root(&root)
@@ -1028,9 +1027,7 @@ mod tests {
             .build()
             .unwrap();
         let project = Project::builder().no_artifacts().paths(paths).ephemeral().build().unwrap();
-        let compiled = project.compile().unwrap();
-        assert!(!compiled.has_compiler_errors());
-        let contracts = compiled.output().contracts;
+        let contracts = project.compile().unwrap().succeeded().output().contracts;
         assert_eq!(contracts.contracts().count(), 2);
     }
 }

@@ -1,7 +1,11 @@
-use ethers_core::types::{Address, Chain};
+#![doc = include_str!("../README.md")]
+#![deny(unsafe_code, rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
+pub use ethers_core::types::{Address, Chain};
+
 use once_cell::sync::Lazy;
 use serde::Deserialize;
-
 use std::collections::HashMap;
 
 const CONTRACTS_JSON: &str = include_str!("./contracts/contracts.json");
@@ -9,7 +13,7 @@ const CONTRACTS_JSON: &str = include_str!("./contracts/contracts.json");
 static ADDRESSBOOK: Lazy<HashMap<String, Contract>> =
     Lazy::new(|| serde_json::from_str(CONTRACTS_JSON).unwrap());
 
-/// Wrapper around a hash map that maps a [chain](https://github.com/gakonst/ethers-rs/blob/master/ethers-core/src/types/chain.rs) to the contract's deployed address on that chain.
+/// Wrapper around a hash map that maps a [Chain] to the contract's deployed address on that chain.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Contract {
     addresses: HashMap<Chain, Address>,
@@ -37,6 +41,7 @@ mod tests {
     fn test_tokens() {
         assert!(contract("dai").is_some());
         assert!(contract("usdc").is_some());
+        assert!(contract("usdt").is_some());
         assert!(contract("rand").is_none());
     }
 

@@ -1,20 +1,19 @@
 use async_trait::async_trait;
 use ethers_core::types::{transaction::eip2718::TypedTransaction, *};
-use ethers_providers::{FromErr, Middleware, PendingTransaction};
-use std::{
-    fmt::Debug,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
-};
+use ethers_providers::{Middleware, MiddlewareError, PendingTransaction};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::fmt::Debug;
 use thiserror::Error;
 
 #[derive(Debug)]
 /// Middleware used for calculating nonces locally, useful for signing multiple
 /// consecutive transactions without waiting for them to hit the mempool
 pub struct NonceManagerMiddleware<M> {
+    inner: M,
+    init_guard: futures_locks::Mutex<()>,
     initialized: AtomicBool,
     nonce: AtomicU64,
     address: Address,
-    inner: M,
 }
 
 impl<M> NonceManagerMiddleware<M>
@@ -24,7 +23,13 @@ where
     /// Instantiates the nonce manager with a 0 nonce. The `address` should be the
     /// address which you'll be sending transactions from
     pub fn new(inner: M, address: Address) -> Self {
-        Self { initialized: false.into(), nonce: 0.into(), inner, address }
+        Self {
+            inner,
+            init_guard: Default::default(),
+            initialized: Default::default(),
+            nonce: Default::default(),
+            address,
+        }
     }
 
     /// Returns the next nonce to be used
@@ -37,19 +42,29 @@ where
         &self,
         block: Option<BlockId>,
     ) -> Result<U256, NonceManagerError<M>> {
-        // initialize the nonce the first time the manager is called
-        if !self.initialized.load(Ordering::SeqCst) {
-            let nonce = self
-                .inner
-                .get_transaction_count(self.address, block)
-                .await
-                .map_err(FromErr::from)?;
-            self.nonce.store(nonce.as_u64(), Ordering::SeqCst);
-            self.initialized.store(true, Ordering::SeqCst);
+        if self.initialized.load(Ordering::SeqCst) {
+            // return current nonce
+            return Ok(self.nonce.load(Ordering::SeqCst).into())
         }
-        // return current nonce
-        Ok(self.nonce.load(Ordering::SeqCst).into())
-    }
+
+        let _guard = self.init_guard.lock().await;
+
+        // do this again in case multiple tasks enter this codepath
+        if self.initialized.load(Ordering::SeqCst) {
+            // return current nonce
+            return Ok(self.nonce.load(Ordering::SeqCst).into())
+        }
+
+        // initialize the nonce the first time the manager is called
+        let nonce = self
+            .inner
+            .get_transaction_count(self.address, block)
+            .await
+            .map_err(MiddlewareError::from_err)?;
+        self.nonce.store(nonce.as_u64(), Ordering::SeqCst);
+        self.initialized.store(true, Ordering::SeqCst);
+        Ok(nonce)
+    } // guard dropped here
 
     async fn get_transaction_count_with_manager(
         &self,
@@ -61,7 +76,7 @@ where
                 .inner
                 .get_transaction_count(self.address, block)
                 .await
-                .map_err(FromErr::from)?;
+                .map_err(MiddlewareError::from_err)?;
             self.nonce.store(nonce.as_u64(), Ordering::SeqCst);
             self.initialized.store(true, Ordering::SeqCst);
         }
@@ -78,9 +93,17 @@ pub enum NonceManagerError<M: Middleware> {
     MiddlewareError(M::Error),
 }
 
-impl<M: Middleware> FromErr<M::Error> for NonceManagerError<M> {
-    fn from(src: M::Error) -> Self {
+impl<M: Middleware> MiddlewareError for NonceManagerError<M> {
+    type Inner = M::Error;
+
+    fn from_err(src: M::Error) -> Self {
         NonceManagerError::MiddlewareError(src)
+    }
+
+    fn as_inner(&self) -> Option<&Self::Inner> {
+        match self {
+            NonceManagerError::MiddlewareError(e) => Some(e),
+        }
     }
 }
 
@@ -107,7 +130,7 @@ where
             tx.set_nonce(self.get_transaction_count_with_manager(block).await?);
         }
 
-        Ok(self.inner().fill_transaction(tx, block).await.map_err(FromErr::from)?)
+        Ok(self.inner().fill_transaction(tx, block).await.map_err(MiddlewareError::from_err)?)
     }
 
     /// Signs and broadcasts the transaction. The optional parameter `block` can be passed so that
@@ -133,10 +156,10 @@ where
                     // was a nonce mismatch
                     self.nonce.store(nonce.as_u64(), Ordering::SeqCst);
                     tx.set_nonce(nonce);
-                    self.inner.send_transaction(tx, block).await.map_err(FromErr::from)
+                    self.inner.send_transaction(tx, block).await.map_err(MiddlewareError::from_err)
                 } else {
                     // propagate the error otherwise
-                    Err(FromErr::from(err))
+                    Err(MiddlewareError::from_err(err))
                 }
             }
         }

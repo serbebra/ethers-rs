@@ -3,8 +3,7 @@ use ethers_core::types::Address;
 use semver::Version;
 use serde::{Deserialize, Deserializer};
 
-static SOLC_BIN_LIST_URL: &str =
-    "https://raw.githubusercontent.com/ethereum/solc-bin/gh-pages/bin/list.txt";
+static SOLC_BIN_LIST_URL: &str = "https://binaries.soliditylang.org/bin/list.txt";
 
 /// Given a Solc [Version], lookup the build metadata and return the full SemVer.
 /// e.g. `0.8.13` -> `0.8.13+commit.abaa5c0e`
@@ -25,71 +24,57 @@ pub async fn lookup_compiler_version(version: &Version) -> Result<Version> {
 pub fn deserialize_address_opt<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<Address>, D::Error> {
-    let s = String::deserialize(deserializer)?;
-    if s.is_empty() {
-        Ok(None)
-    } else {
-        let addr: Address = s.parse().map_err(serde::de::Error::custom)?;
-        Ok(Some(addr))
+    match Option::<String>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(s) => match s.is_empty() {
+            true => Ok(None),
+            _ => Ok(Some(s.parse().map_err(serde::de::Error::custom)?)),
+        },
     }
 }
 
-/// Deserializes as JSON:
+/// Deserializes as JSON either:
 ///
-/// `{ "SourceCode": "{{ .. }}", ..}`
-///
-/// or
-///
-/// `{ "SourceCode": "..", .. }`
-pub fn deserialize_stringified_source_code<'de, D: Deserializer<'de>>(
+/// - Object: `{ "SourceCode": { language: "Solidity", .. }, ..}`
+/// - Stringified JSON object:
+///     - `{ "SourceCode": "{{\r\n  \"language\": \"Solidity\", ..}}", ..}`
+///     - `{ "SourceCode": "{ \"file.sol\": \"...\" }", ... }`
+/// - Normal source code string: `{ "SourceCode": "// SPDX-License-Identifier: ...", .. }`
+pub fn deserialize_source_code<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<SourceCodeMetadata, D::Error> {
-    let s = String::deserialize(deserializer)?;
-    if s.starts_with("{{") && s.ends_with("}}") {
-        let s = &s[1..s.len() - 1];
-        serde_json::from_str(s).map_err(serde::de::Error::custom)
-    } else {
-        Ok(SourceCodeMetadata::SourceCode(s))
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SourceCode {
+        String(String), // this must come first
+        Obj(SourceCodeMetadata),
+    }
+    let s = SourceCode::deserialize(deserializer)?;
+    match s {
+        SourceCode::String(s) => {
+            if s.starts_with('{') && s.ends_with('}') {
+                let mut s = s.as_str();
+                // skip double braces
+                if s.starts_with("{{") && s.ends_with("}}") {
+                    s = &s[1..s.len() - 1];
+                }
+                serde_json::from_str(s).map_err(serde::de::Error::custom)
+            } else {
+                Ok(SourceCodeMetadata::SourceCode(s))
+            }
+        }
+        SourceCode::Obj(obj) => Ok(obj),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{contract::SourceCodeLanguage, tests::run_at_least_duration};
-    use semver::{BuildMetadata, Prerelease};
-    use serial_test::serial;
-    use std::time::Duration;
-
-    #[tokio::test]
-    #[serial]
-    async fn can_lookup_compiler_version_build_metadata() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let v = Version::new(0, 8, 13);
-            let version = lookup_compiler_version(&v).await.unwrap();
-            assert_eq!(v.major, version.major);
-            assert_eq!(v.minor, version.minor);
-            assert_eq!(v.patch, version.patch);
-            assert_ne!(version.build, BuildMetadata::EMPTY);
-            assert_eq!(version.pre, Prerelease::EMPTY);
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn errors_on_invalid_solc() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let v = Version::new(100, 0, 0);
-            let err = lookup_compiler_version(&v).await.unwrap_err();
-            assert!(matches!(err, EtherscanError::MissingSolcVersion(_)));
-        })
-        .await
-    }
+    use crate::contract::SourceCodeLanguage;
 
     #[test]
     fn can_deserialize_address_opt() {
-        #[derive(Deserialize)]
+        #[derive(serde::Serialize, Deserialize)]
         struct Test {
             #[serde(deserialize_with = "deserialize_address_opt")]
             address: Option<Address>,
@@ -100,6 +85,11 @@ mod tests {
         let de: Test = serde_json::from_str(json).unwrap();
         assert_eq!(de.address, None);
 
+        // Round-trip the above
+        let json = serde_json::to_string(&de).unwrap();
+        let de: Test = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.address, None);
+
         // https://api.etherscan.io/api?module=contract&action=getsourcecode&address=0xDef1C0ded9bec7F1a1670819833240f027b25EfF
         let json = r#"{"address":"0x4af649ffde640ceb34b1afaba3e0bb8e9698cb01"}"#;
         let de: Test = serde_json::from_str(json).unwrap();
@@ -108,24 +98,36 @@ mod tests {
     }
 
     #[test]
-    fn can_deserialize_stringified_source_code() {
+    fn can_deserialize_source_code() {
         #[derive(Deserialize)]
         struct Test {
-            #[serde(deserialize_with = "deserialize_stringified_source_code")]
+            #[serde(deserialize_with = "deserialize_source_code")]
             source_code: SourceCodeMetadata,
         }
 
         let src = "source code text";
 
+        // Normal JSON
         let json = r#"{
-            "source_code": "{{ \"language\": \"Solidity\", \"sources\": {\"Contract\": { \"content\": \"source code text\" } } }}"
+            "source_code": { "language": "Solidity", "sources": { "Contract": { "content": "source code text" } } }
         }"#;
         let de: Test = serde_json::from_str(json).unwrap();
         assert!(matches!(de.source_code.language().unwrap(), SourceCodeLanguage::Solidity));
         assert_eq!(de.source_code.sources().len(), 1);
         assert_eq!(de.source_code.sources().get("Contract").unwrap().content, src);
         #[cfg(feature = "ethers-solc")]
-        assert!(matches!(de.source_code.settings().unwrap(), None));
+        assert!(de.source_code.settings().unwrap().is_none());
+
+        // Stringified JSON
+        let json = r#"{
+            "source_code": "{{ \"language\": \"Solidity\", \"sources\": { \"Contract\": { \"content\": \"source code text\" } } }}"
+        }"#;
+        let de: Test = serde_json::from_str(json).unwrap();
+        assert!(matches!(de.source_code.language().unwrap(), SourceCodeLanguage::Solidity));
+        assert_eq!(de.source_code.sources().len(), 1);
+        assert_eq!(de.source_code.sources().get("Contract").unwrap().content, src);
+        #[cfg(feature = "ethers-solc")]
+        assert!(de.source_code.settings().unwrap().is_none());
 
         let json = r#"{"source_code": "source code text"}"#;
         let de: Test = serde_json::from_str(json).unwrap();

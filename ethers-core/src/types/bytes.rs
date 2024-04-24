@@ -16,31 +16,82 @@ pub struct Bytes(
     pub  bytes::Bytes,
 );
 
-fn bytes_to_hex(b: &Bytes) -> String {
-    hex::encode(b.0.as_ref())
+impl hex::FromHex for Bytes {
+    type Error = hex::FromHexError;
+
+    fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
+        hex::decode(hex).map(Into::into)
+    }
+}
+
+impl FromIterator<u8> for Bytes {
+    fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
+        iter.into_iter().collect::<bytes::Bytes>().into()
+    }
+}
+
+impl<'a> FromIterator<&'a u8> for Bytes {
+    fn from_iter<T: IntoIterator<Item = &'a u8>>(iter: T) -> Self {
+        iter.into_iter().copied().collect::<bytes::Bytes>().into()
+    }
+}
+
+impl Bytes {
+    /// Creates a new empty `Bytes`.
+    ///
+    /// This will not allocate and the returned `Bytes` handle will be empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ethers_core::types::Bytes;
+    ///
+    /// let b = Bytes::new();
+    /// assert_eq!(&b[..], b"");
+    /// ```
+    #[inline]
+    pub const fn new() -> Self {
+        Self(bytes::Bytes::new())
+    }
+
+    /// Creates a new `Bytes` from a static slice.
+    ///
+    /// The returned `Bytes` will point directly to the static slice. There is
+    /// no allocating or copying.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ethers_core::types::Bytes;
+    ///
+    /// let b = Bytes::from_static(b"hello");
+    /// assert_eq!(&b[..], b"hello");
+    /// ```
+    #[inline]
+    pub const fn from_static(bytes: &'static [u8]) -> Self {
+        Self(bytes::Bytes::from_static(bytes))
+    }
+
+    fn hex_encode(&self) -> String {
+        hex::encode(self.0.as_ref())
+    }
 }
 
 impl Debug for Bytes {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "Bytes(0x{})", bytes_to_hex(self))
+        write!(f, "Bytes(0x{})", self.hex_encode())
     }
 }
 
 impl Display for Bytes {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "0x{}", bytes_to_hex(self))
+        write!(f, "0x{}", self.hex_encode())
     }
 }
 
 impl LowerHex for Bytes {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "0x{}", bytes_to_hex(self))
-    }
-}
-
-impl Bytes {
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.as_ref().to_vec()
+        write!(f, "0x{}", self.hex_encode())
     }
 }
 
@@ -154,19 +205,13 @@ impl Decodable for Bytes {
 
 #[derive(Debug, Clone, Error)]
 #[error("Failed to parse bytes: {0}")]
-pub struct ParseBytesError(String);
+pub struct ParseBytesError(hex::FromHexError);
 
 impl FromStr for Bytes {
     type Err = ParseBytesError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if let Some(value) = value.strip_prefix("0x") {
-            hex::decode(value)
-        } else {
-            hex::decode(value)
-        }
-        .map(Into::into)
-        .map_err(|e| ParseBytesError(format!("Invalid hex: {e}")))
+        hex::FromHex::from_hex(value).map_err(ParseBytesError)
     }
 }
 
@@ -175,7 +220,7 @@ where
     S: Serializer,
     T: AsRef<[u8]>,
 {
-    s.serialize_str(&format!("0x{}", hex::encode(x.as_ref())))
+    s.serialize_str(&hex::encode_prefixed(x))
 }
 
 pub fn deserialize_bytes<'de, D>(d: D) -> Result<bytes::Bytes, D::Error>
@@ -183,13 +228,7 @@ where
     D: Deserializer<'de>,
 {
     let value = String::deserialize(d)?;
-    if let Some(value) = value.strip_prefix("0x") {
-        hex::decode(value)
-    } else {
-        hex::decode(&value)
-    }
-    .map(Into::into)
-    .map_err(|e| serde::de::Error::custom(e.to_string()))
+    hex::decode(value).map(Into::into).map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]

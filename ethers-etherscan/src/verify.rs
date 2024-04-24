@@ -24,9 +24,21 @@ pub struct VerifyContract {
     /// applicable when codeformat=solidity-single-file
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runs: Option<String>,
-    /// NOTE: there is a typo in the etherscan API `constructorArguements`
+    /// The constructor arguments for the contract, if any.
+    ///
+    /// NOTE: This is renamed as the misspelled `ethers-etherscan/src/verify.rs`. The reason for
+    /// this is that Etherscan has had this misspelling on their API for quite a long time, and
+    /// changing it would break verification with arguments.
+    ///
+    /// For instances (e.g. blockscout) that might support the proper spelling, the field
+    /// `blockscout_constructor_arguments` is populated with the exact arguments passed to this
+    /// field as well.
     #[serde(rename = "constructorArguements", skip_serializing_if = "Option::is_none")]
     pub constructor_arguments: Option<String>,
+    /// Properly spelled constructor arguments. This is needed as some blockscout instances
+    /// can identify the correct spelling instead of the misspelled version above.
+    #[serde(rename = "constructorArguments", skip_serializing_if = "Option::is_none")]
+    pub blockscout_constructor_arguments: Option<String>,
     /// applicable when codeformat=solidity-single-file
     #[serde(rename = "evmversion", skip_serializing_if = "Option::is_none")]
     pub evm_version: Option<String>,
@@ -50,6 +62,7 @@ impl VerifyContract {
             optimization_used: None,
             runs: None,
             constructor_arguments: None,
+            blockscout_constructor_arguments: None,
             evm_version: None,
             other: Default::default(),
         }
@@ -99,15 +112,27 @@ impl VerifyContract {
         mut self,
         constructor_arguments: Option<impl Into<String>>,
     ) -> Self {
-        self.constructor_arguments = constructor_arguments.map(|s| {
+        let constructor_args = constructor_arguments.map(|s| {
             s.into()
                 .trim()
                 // TODO is this correct?
                 .trim_start_matches("0x")
                 .to_string()
         });
+        self.constructor_arguments = constructor_args.clone();
+        self.blockscout_constructor_arguments = constructor_args;
         self
     }
+}
+
+/// Arguments for verifying a proxy contract
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyProxyContract {
+    /// Proxy contract's address
+    pub address: Address,
+    /// Implementation contract proxy points to - must be verified before call.
+    #[serde(default, rename = "expectedimplementation", skip_serializing_if = "Option::is_none")]
+    pub expected_impl: Option<Address>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,56 +177,27 @@ impl Client {
         );
         self.post_form(&body).await
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{tests::run_at_least_duration, Client};
-    use ethers_core::types::Chain;
-    use ethers_solc::{Project, ProjectPathsConfig};
-    use serial_test::serial;
-    use std::{path::PathBuf, time::Duration};
-
-    #[allow(unused)]
-    fn init_tracing() {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-            .init();
+    /// Submit Proxy Contract for Verification
+    pub async fn submit_proxy_contract_verification(
+        &self,
+        contract: &VerifyProxyContract,
+    ) -> Result<Response<String>> {
+        let body = self.create_query("contract", "verifyproxycontract", contract);
+        self.post_form(&body).await
     }
 
-    #[tokio::test]
-    #[serial]
-    #[ignore]
-    async fn can_flatten_and_verify_contract() {
-        init_tracing();
-        run_at_least_duration(Duration::from_millis(250), async {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
-            let paths = ProjectPathsConfig::builder()
-                .sources(&root)
-                .build()
-                .expect("failed to resolve project paths");
-            let project = Project::builder()
-                .paths(paths)
-                .build()
-                .expect("failed to build the project");
-
-            let address = "0x9e744c9115b74834c0f33f4097f40c02a9ac5c33".parse().unwrap();
-            let compiler_version = "v0.5.17+commit.d19bba13";
-            let constructor_args = "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000000000000000000000000000000000005f5e1000000000000000000000000000000000000000000000000000000000000000007596179537761700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000035941590000000000000000000000000000000000000000000000000000000000";
-            let contract = project.flatten(&root.join("UniswapExchange.sol")).expect("failed to flatten contract");
-            let contract_name = "UniswapExchange".to_owned();
-
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let contract =
-                VerifyContract::new(address, contract_name, contract, compiler_version.to_string())
-                    .constructor_arguments(Some(constructor_args))
-                    .optimization(true)
-                    .runs(200);
-            let resp = client.submit_contract_verification(&contract).await.expect("failed to send the request");
-            assert_ne!(resp.result, "Error!"); // `Error!` result means that request was malformatted
-        })
-        .await
+    /// Check Proxy Contract Verification Status with receipt received from
+    /// `[Self::submit_proxy_contract_verification]`
+    pub async fn check_proxy_contract_verification_status(
+        &self,
+        guid: impl AsRef<str>,
+    ) -> Result<Response<String>> {
+        let body = self.create_query(
+            "contract",
+            "checkproxyverification",
+            HashMap::from([("guid", guid.as_ref())]),
+        );
+        self.post_form(&body).await
     }
 }

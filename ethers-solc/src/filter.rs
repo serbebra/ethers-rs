@@ -53,11 +53,13 @@ impl FileFilter for TestFileFilter {
 
 /// A type that can apply a filter to a set of preprocessed [FilteredSources] in order to set sparse
 /// output for specific files
+#[derive(Default)]
 pub enum SparseOutputFilter {
     /// Sets the configured [OutputSelection] for dirty files only.
     ///
     /// In other words, we request the output of solc only for files that have been detected as
     /// _dirty_.
+    #[default]
     AllDirty,
     /// Apply an additional filter to [FilteredSources] to
     Custom(Box<dyn FileFilter>),
@@ -176,12 +178,6 @@ impl From<Box<dyn FileFilter>> for SparseOutputFilter {
     }
 }
 
-impl Default for SparseOutputFilter {
-    fn default() -> Self {
-        SparseOutputFilter::AllDirty
-    }
-}
-
 impl fmt::Debug for SparseOutputFilter {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -291,14 +287,17 @@ impl FilteredSource {
 /// Helper type that determines the state of a source file
 #[derive(Debug)]
 pub struct FilteredSourceInfo {
-    /// path to the source file
+    /// Path to the source file.
     pub file: PathBuf,
-    /// contents of the file
+
+    /// Contents of the file.
     pub source: Source,
-    /// idx in the [GraphEdges]
+
+    /// Index in the [GraphEdges].
     pub idx: usize,
-    /// whether this file is actually dirty
+
+    /// Whether this file is actually dirty.
     ///
-    /// See also [ArtifactsCacheInner::is_dirty()]
+    /// See also `ArtifactsCacheInner::is_dirty`
     pub dirty: bool,
 }

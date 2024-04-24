@@ -1,7 +1,7 @@
 use crate::{Client, EtherscanError, Query, Response, Result};
 use ethers_core::{
     abi::Address,
-    types::{serde_helpers::*, BlockNumber, Bytes, H256, H32, U256},
+    types::{serde_helpers::*, BlockNumber, Bytes, H256, U256},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -99,42 +99,6 @@ mod json_string {
     }
 }
 
-mod hex_string {
-    use super::*;
-    use serde::{
-        de::{DeserializeOwned, Error as _},
-        ser::Error as _,
-        Deserializer, Serializer,
-    };
-
-    pub fn serialize<T, S>(value: &Option<T>, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        T: Serialize,
-        S: Serializer,
-    {
-        let json = match value {
-            Option::None => Cow::from("0x"),
-            Option::Some(value) => serde_json::to_string(value).map_err(S::Error::custom)?.into(),
-        };
-        serializer.serialize_str(&json)
-    }
-
-    pub fn deserialize<'de, T, D>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
-    where
-        T: DeserializeOwned,
-        D: Deserializer<'de>,
-    {
-        let json = Cow::<'de, str>::deserialize(deserializer)?;
-        if json.is_empty() || json == "0x" {
-            Ok(Option::None)
-        } else {
-            serde_json::from_str(&format!("\"{}\"", &json))
-                .map(Option::Some)
-                .map_err(D::Error::custom)
-        }
-    }
-}
-
 /// Possible values for some field responses.
 ///
 /// Transactions from the Genesis block may contain fields that do not conform to the expected
@@ -186,6 +150,7 @@ pub struct NormalTransaction {
     pub transaction_index: Option<u64>,
     #[serde(with = "genesis_string")]
     pub from: GenesisOption<Address>,
+    #[serde(with = "json_string")]
     pub to: Option<Address>,
     #[serde(deserialize_with = "deserialize_stringified_numeric")]
     pub value: U256,
@@ -204,8 +169,7 @@ pub struct NormalTransaction {
     pub cumulative_gas_used: U256,
     #[serde(deserialize_with = "deserialize_stringified_u64")]
     pub confirmations: u64,
-    #[serde(with = "hex_string")]
-    pub method_id: Option<H32>,
+    pub method_id: Option<Bytes>,
     #[serde(with = "json_string")]
     pub function_name: Option<String>,
 }
@@ -353,11 +317,27 @@ pub struct MinedBlock {
     pub block_reward: String,
 }
 
+/// The raw response from the beacon wihtdrawal transaction list API endpoint
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeaconWithdrawalTransaction {
+    #[serde(deserialize_with = "deserialize_stringified_block_number")]
+    pub block_number: BlockNumber,
+    pub timestamp: String,
+    #[serde(deserialize_with = "deserialize_stringified_u64")]
+    pub withdrawal_index: u64,
+    #[serde(deserialize_with = "deserialize_stringified_u64")]
+    pub validator_index: u64,
+    pub address: Address,
+    pub amount: String,
+}
+
 /// The pre-defined block parameter for balance API endpoints
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum Tag {
     Earliest,
     Pending,
+    #[default]
     Latest,
 }
 
@@ -368,12 +348,6 @@ impl Display for Tag {
             Tag::Pending => write!(f, "pending"),
             Tag::Latest => write!(f, "latest"),
         }
-    }
-}
-
-impl Default for Tag {
-    fn default() -> Self {
-        Tag::Latest
     }
 }
 
@@ -396,11 +370,11 @@ impl Display for Sort {
 /// Common optional arguments for the transaction or event list API endpoints
 #[derive(Clone, Copy, Debug)]
 pub struct TxListParams {
-    start_block: u64,
-    end_block: u64,
-    page: u64,
-    offset: u64,
-    sort: Sort,
+    pub start_block: u64,
+    pub end_block: u64,
+    pub page: u64,
+    pub offset: u64,
+    pub sort: Sort,
 }
 
 impl TxListParams {
@@ -465,8 +439,9 @@ impl TokenQueryOption {
 }
 
 /// The pre-defined block type for retrieving mined blocks
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub enum BlockType {
+    #[default]
     CanonicalBlocks,
     Uncles,
 }
@@ -480,26 +455,16 @@ impl Display for BlockType {
     }
 }
 
-impl Default for BlockType {
-    fn default() -> Self {
-        BlockType::CanonicalBlocks
-    }
-}
-
 impl Client {
     /// Returns the Ether balance of a given address.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let balance = client
-    ///         .get_ether_balance_single(&"0x58eB28A67731c570Ef827C365c89B5751F9E6b0a".parse().unwrap(),
-    ///         None).await.unwrap();
-    /// # }
+    /// ```no_run
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0x58eB28A67731c570Ef827C365c89B5751F9E6b0a".parse()?;
+    /// let balance = client.get_ether_balance_single(&address, None).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_ether_balance_single(
         &self,
@@ -524,21 +489,22 @@ impl Client {
 
     /// Returns the balance of the accounts from a list of addresses.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let balances = client
-    ///         .get_ether_balance_multi(&vec![&"0x58eB28A67731c570Ef827C365c89B5751F9E6b0a".parse().unwrap()],
-    ///         None).await.unwrap();
-    /// # }
+    /// ```no_run
+    /// # use ethers_core::types::Address;
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let addresses = [
+    ///     "0x3E3c00494d0b306a0739E480DBB5DB91FFb5d4CB".parse::<Address>()?,
+    ///     "0x7e9996ef050a9Fa7A01248e63271F69086aaFc9D".parse::<Address>()?,
+    /// ];
+    /// let balances = client.get_ether_balance_multi(&addresses, None).await?;
+    /// assert_eq!(addresses.len(), balances.len());
+    /// # Ok(()) }
     /// ```
     pub async fn get_ether_balance_multi(
         &self,
-        addresses: &[&Address],
+        addresses: &[Address],
         tag: Option<Tag>,
     ) -> Result<Vec<AccountBalance>> {
         let tag_str = tag.unwrap_or_default().to_string();
@@ -559,17 +525,13 @@ impl Client {
 
     /// Returns the list of transactions performed by an address, with optional pagination.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let txs = client
-    ///         .get_transactions(&"0x58eB28A67731c570Ef827C365c89B5751F9E6b0a".parse().unwrap(),
-    ///         None).await.unwrap();
-    /// # }
+    /// ```no_run
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0x1f162cf730564efD2Bb96eb27486A2801d76AFB6".parse()?;
+    /// let transactions = client.get_transactions(&address, None).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_transactions(
         &self,
@@ -587,18 +549,16 @@ impl Client {
     /// Returns the list of internal transactions performed by an address or within a transaction,
     /// with optional pagination.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::{Client, account::InternalTxQueryOption};
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let txs = client
-    ///         .get_internal_transactions(
-    ///             InternalTxQueryOption::ByAddress(
-    ///                 "0x2c1ba59d6f58433fb1eaee7d20b26ed83bda51a3".parse().unwrap()), None).await.unwrap();
-    /// # }
+    /// ```no_run
+    /// use ethers_etherscan::account::InternalTxQueryOption;
+    ///
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0x2c1ba59d6f58433fb1eaee7d20b26ed83bda51a3".parse()?;
+    /// let query = InternalTxQueryOption::ByAddress(address);
+    /// let internal_transactions = client.get_internal_transactions(query, None).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_internal_transactions(
         &self,
@@ -624,18 +584,16 @@ impl Client {
     /// Returns the list of ERC-20 tokens transferred by an address, with optional filtering by
     /// token contract.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::{Client, account::TokenQueryOption};
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let txs = client
-    ///         .get_erc20_token_transfer_events(
-    ///             TokenQueryOption::ByAddress(
-    ///                 "0x4e83362442b8d1bec281594cea3050c8eb01311c".parse().unwrap()), None).await.unwrap();
-    /// # }
+    /// ```no_run
+    /// use ethers_etherscan::account::TokenQueryOption;
+    ///
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0x4e83362442b8d1bec281594cea3050c8eb01311c".parse()?;
+    /// let query = TokenQueryOption::ByAddress(address);
+    /// let events = client.get_erc20_token_transfer_events(query, None).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_erc20_token_transfer_events(
         &self,
@@ -652,20 +610,16 @@ impl Client {
     /// Returns the list of ERC-721 ( NFT ) tokens transferred by an address, with optional
     /// filtering by token contract.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::{Client, account::TokenQueryOption};
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let txs = client
-    ///         .get_erc721_token_transfer_events(
-    ///             TokenQueryOption::ByAddressAndContract(
-    ///                 "0x6975be450864c02b4613023c2152ee0743572325".parse().unwrap(),
-    ///                 "0x06012c8cf97bead5deae237070f9587f8e7a266d".parse().unwrap(),
-    ///          ), None).await.unwrap();
-    /// # }
+    /// ```no_run
+    /// use ethers_etherscan::account::TokenQueryOption;
+    ///
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let contract = "0x06012c8cf97bead5deae237070f9587f8e7a266d".parse()?;
+    /// let query = TokenQueryOption::ByContract(contract);
+    /// let events = client.get_erc721_token_transfer_events(query, None).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_erc721_token_transfer_events(
         &self,
@@ -682,20 +636,17 @@ impl Client {
     /// Returns the list of ERC-1155 ( NFT ) tokens transferred by an address, with optional
     /// filtering by token contract.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::{Client, account::TokenQueryOption};
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let txs = client
-    ///         .get_erc1155_token_transfer_events(
-    ///             TokenQueryOption::ByAddressAndContract(
-    ///                 "0x216CD350a4044e7016f14936663e2880Dd2A39d7".parse().unwrap(),
-    ///                 "0x495f947276749ce646f68ac8c248420045cb7b5e".parse().unwrap(),
-    ///          ), None).await.unwrap();
-    /// # }
+    /// ```no_run
+    /// use ethers_etherscan::account::TokenQueryOption;
+    ///
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0x216CD350a4044e7016f14936663e2880Dd2A39d7".parse()?;
+    /// let contract = "0x495f947276749ce646f68ac8c248420045cb7b5e".parse()?;
+    /// let query = TokenQueryOption::ByAddressAndContract(address, contract);
+    /// let events = client.get_erc1155_token_transfer_events(query, None).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_erc1155_token_transfer_events(
         &self,
@@ -711,17 +662,13 @@ impl Client {
 
     /// Returns the list of blocks mined by an address.
     ///
-    /// ```no_run
-    /// # use ethers_etherscan::Client;
-    /// # use ethers_core::types::Chain;
+    /// # Examples
     ///
-    /// # #[tokio::main]
-    /// # async fn main() {
-    ///     let client = Client::new(Chain::Mainnet, "API_KEY").unwrap();
-    ///     let blocks = client
-    ///         .get_mined_blocks(&"0x9dd134d14d1e65f84b706d6f205cd5b1cd03a46b".parse().unwrap(), None, None)
-    ///         .await.unwrap();
-    /// # }
+    /// ```no_run
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0x9dd134d14d1e65f84b706d6f205cd5b1cd03a46b".parse()?;
+    /// let blocks = client.get_mined_blocks(&address, None, None).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn get_mined_blocks(
         &self,
@@ -741,203 +688,67 @@ impl Client {
 
         Ok(response.result)
     }
+
+    /// Returns the list of beacon withdrawal transactions performed by an address, with optional
+    /// pagination.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn foo(client: ethers_etherscan::Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let address = "0xB9D7934878B5FB9610B3fE8A5e441e8fad7E293f".parse()?;
+    /// let beacon_withdrawal_transactions = client.get_beacon_withdrawal_transactions(&address, None).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_beacon_withdrawal_transactions(
+        &self,
+        address: &Address,
+        params: Option<TxListParams>,
+    ) -> Result<Vec<BeaconWithdrawalTransaction>> {
+        let mut tx_params: HashMap<&str, String> = params.unwrap_or_default().into();
+        tx_params.insert("address", format!("{address:?}"));
+        let query = self.create_query("account", "txsBeaconWithdrawal", tx_params);
+        let response: Response<Vec<BeaconWithdrawalTransaction>> = self.get_json(&query).await?;
+
+        Ok(response.result)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use serial_test::serial;
-
-    use crate::{tests::run_at_least_duration, Chain};
-
     use super::*;
 
-    #[tokio::test]
-    #[serial]
-    async fn get_ether_balance_single_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let balance = client
-                .get_ether_balance_single(
-                    &"0x58eB28A67731c570Ef827C365c89B5751F9E6b0a".parse().unwrap(),
-                    None,
-                )
-                .await;
-            balance.unwrap();
-        })
-        .await
+    // <https://github.com/gakonst/ethers-rs/issues/2612>
+    #[test]
+    fn can_parse_response_2612() {
+        let err = r#"{
+  "status": "1",
+  "message": "OK",
+  "result": [
+    {
+      "blockNumber": "18185184",
+      "timeStamp": "1695310607",
+      "hash": "0x95983231acd079498b7628c6b6dd4866f559a23120fbce590c5dd7f10c7628af",
+      "nonce": "1325609",
+      "blockHash": "0x61e106aa2446ba06fe0217eb5bd9dae98a72b56dad2c2197f60a0798ce9f0dc6",
+      "transactionIndex": "45",
+      "from": "0xae2fc483527b8ef99eb5d9b44875f005ba1fae13",
+      "to": "0x6b75d8af000000e20b7a7ddf000ba900b4009a80",
+      "value": "23283064365",
+      "gas": "107142",
+      "gasPrice": "15945612744",
+      "isError": "0",
+      "txreceipt_status": "1",
+      "input": "0xe061",
+      "contractAddress": "",
+      "cumulativeGasUsed": "3013734",
+      "gasUsed": "44879",
+      "confirmations": "28565",
+      "methodId": "0xe061",
+      "functionName": ""
     }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_ether_balance_multi_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let balances = client
-                .get_ether_balance_multi(
-                    &[&"0x58eB28A67731c570Ef827C365c89B5751F9E6b0a".parse().unwrap()],
-                    None,
-                )
-                .await;
-            assert!(balances.is_ok());
-            let balances = balances.unwrap();
-            assert_eq!(balances.len(), 1);
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_transactions_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let txs = client
-                .get_transactions(
-                    &"0x58eB28A67731c570Ef827C365c89B5751F9E6b0a".parse().unwrap(),
-                    None,
-                )
-                .await;
-            txs.unwrap();
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_internal_transactions_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let txs = client
-                .get_internal_transactions(
-                    InternalTxQueryOption::ByAddress(
-                        "0x2c1ba59d6f58433fb1eaee7d20b26ed83bda51a3".parse().unwrap(),
-                    ),
-                    None,
-                )
-                .await;
-            txs.unwrap();
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_internal_transactions_by_tx_hash_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let txs = client
-                .get_internal_transactions(
-                    InternalTxQueryOption::ByTransactionHash(
-                        "0x40eb908387324f2b575b4879cd9d7188f69c8fc9d87c901b9e2daaea4b442170"
-                            .parse()
-                            .unwrap(),
-                    ),
-                    None,
-                )
-                .await;
-            txs.unwrap();
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_erc20_transfer_events_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let txs = client
-                .get_erc20_token_transfer_events(
-                    TokenQueryOption::ByAddress(
-                        "0x4e83362442b8d1bec281594cea3050c8eb01311c".parse().unwrap(),
-                    ),
-                    None,
-                )
-                .await
-                .unwrap();
-            let tx = txs.get(0).unwrap();
-            assert_eq!(tx.gas_used, 93657u64.into());
-            assert_eq!(tx.nonce, 10u64.into());
-            assert_eq!(tx.block_number, 2228258u64.into());
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_erc721_transfer_events_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let txs = client
-                .get_erc721_token_transfer_events(
-                    TokenQueryOption::ByAddressAndContract(
-                        "0x6975be450864c02b4613023c2152ee0743572325".parse().unwrap(),
-                        "0x06012c8cf97bead5deae237070f9587f8e7a266d".parse().unwrap(),
-                    ),
-                    None,
-                )
-                .await;
-            txs.unwrap();
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_erc1155_transfer_events_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let txs = client
-                .get_erc1155_token_transfer_events(
-                    TokenQueryOption::ByAddressAndContract(
-                        "0x216CD350a4044e7016f14936663e2880Dd2A39d7".parse().unwrap(),
-                        "0x495f947276749ce646f68ac8c248420045cb7b5e".parse().unwrap(),
-                    ),
-                    None,
-                )
-                .await;
-            txs.unwrap();
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_mined_blocks_success() {
-        run_at_least_duration(Duration::from_millis(250), async {
-            let client = Client::new_from_env(Chain::Mainnet).unwrap();
-
-            let blocks = client
-                .get_mined_blocks(
-                    &"0x9dd134d14d1e65f84b706d6f205cd5b1cd03a46b".parse().unwrap(),
-                    None,
-                    None,
-                )
-                .await;
-            blocks.unwrap();
-        })
-        .await
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn get_avalanche_transactions() {
-        if std::env::var("SNOWTRACE_API_KEY").is_err() {
-            // nothing to do if api key unset
-            return
-        }
-        let client = Client::new_from_env(Chain::Avalanche).unwrap();
-        let txs = client
-            .get_transactions(&"0x1549ea9b546ba9ffb306d78a1e1f304760cc4abf".parse().unwrap(), None)
-            .await;
-        txs.unwrap();
+  ]
+}"#;
+        let _resp: Response<Vec<NormalTransaction>> = serde_json::from_str(err).unwrap();
     }
 }

@@ -16,6 +16,7 @@ use std::{
         hash_map, BTreeSet, HashMap, HashSet,
     },
     fs::{self},
+    io::Write,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
@@ -139,7 +140,9 @@ impl SolFilesCache {
             self.len(),
             path.display()
         );
-        serde_json::to_writer_pretty(file, self)?;
+        let mut writer = std::io::BufWriter::with_capacity(1024 * 256, file);
+        serde_json::to_writer_pretty(&mut writer, self)?;
+        writer.flush().map_err(|e| SolcError::io(e, path))?;
         tracing::trace!("cache file located: \"{}\"", path.display());
         Ok(())
     }
@@ -456,14 +459,14 @@ impl CacheEntry {
             .modified()
             .map_err(|err| SolcError::io(err, file.to_path_buf()))?
             .duration_since(UNIX_EPOCH)
-            .map_err(|err| SolcError::solc(err.to_string()))?
+            .map_err(SolcError::msg)?
             .as_millis() as u64;
         Ok(last_modification_date)
     }
 
     /// Reads all artifact files associated with the `CacheEntry`
     ///
-    /// **Note:** all artifact file paths should be absolute, see [`Self::join`]
+    /// **Note:** all artifact file paths should be absolute.
     fn read_artifact_files<Artifact: DeserializeOwned>(
         &self,
     ) -> Result<BTreeMap<String, Vec<ArtifactFile<Artifact>>>> {
@@ -500,7 +503,7 @@ impl CacheEntry {
                     entry.insert(artifacts);
                 }
                 Entry::Occupied(mut entry) => {
-                    entry.get_mut().extend(artifacts.into_iter());
+                    entry.get_mut().extend(artifacts);
                 }
             }
         }
@@ -527,7 +530,7 @@ impl CacheEntry {
 
     /// Iterator that yields all artifact files and their version
     pub fn artifacts_versions(&self) -> impl Iterator<Item = (&Version, &PathBuf)> {
-        self.artifacts.values().flat_map(|artifacts| artifacts.iter())
+        self.artifacts.values().flatten()
     }
 
     /// Returns the artifact file for the contract and version pair
@@ -545,12 +548,12 @@ impl CacheEntry {
 
     /// Iterator that yields all artifact files
     pub fn artifacts(&self) -> impl Iterator<Item = &PathBuf> {
-        self.artifacts.values().flat_map(|artifacts| artifacts.values())
+        self.artifacts.values().flat_map(BTreeMap::values)
     }
 
     /// Mutable iterator over all artifact files
     pub fn artifacts_mut(&mut self) -> impl Iterator<Item = &mut PathBuf> {
-        self.artifacts.values_mut().flat_map(|artifacts| artifacts.values_mut())
+        self.artifacts.values_mut().flat_map(BTreeMap::values_mut)
     }
 
     /// Checks if all artifact files exist
@@ -579,27 +582,32 @@ impl CacheEntry {
 /// and which `Artifacts` can be reused.
 #[derive(Debug)]
 pub(crate) struct ArtifactsCacheInner<'a, T: ArtifactOutput> {
-    /// preexisting cache file
+    /// The preexisting cache file.
     pub cache: SolFilesCache,
-    /// all already existing artifacts
+
+    /// All already existing artifacts.
     pub cached_artifacts: Artifacts<T::Artifact>,
-    /// relationship between all the files
+
+    /// Relationship between all the files.
     pub edges: GraphEdges,
-    /// the project
+
+    /// The project.
     pub project: &'a Project<T>,
-    /// all files that were filtered because they haven't changed
+
+    /// All the files that were filtered because they haven't changed.
     pub filtered: HashMap<PathBuf, (Source, HashSet<Version>)>,
-    /// the corresponding cache entries for all sources that were deemed to be dirty
+
+    /// The corresponding cache entries for all sources that were deemed to be dirty.
     ///
-    /// `CacheEntry` are grouped by their solidity file.
+    /// `CacheEntry` are grouped by their Solidity file.
     /// During preprocessing the `artifacts` field of a new `CacheEntry` is left blank, because in
     /// order to determine the artifacts of the solidity file, the file needs to be compiled first.
     /// Only after the `CompilerOutput` is received and all compiled contracts are handled, see
-    /// [`crate::ArtifactOutput::on_output()`] all artifacts, their disk paths, are determined and
-    /// can be populated before the updated [`crate::SolFilesCache`] is finally written to disk,
-    /// see [`Cache::finish()`]
+    /// [`crate::ArtifactOutput::on_output`] all artifacts, their disk paths, are determined and
+    /// can be populated before the updated [`crate::SolFilesCache`] is finally written to disk.
     pub dirty_source_files: HashMap<PathBuf, (CacheEntry, HashSet<Version>)>,
-    /// the file hashes
+
+    /// The file hashes.
     pub content_hashes: HashMap<PathBuf, String>,
 }
 
@@ -652,7 +660,7 @@ impl<'a, T: ArtifactOutput> ArtifactsCacheInner<'a, T> {
         }
     }
 
-    /// Returns the set of [Source]s that need to be included in the [CompilerOutput] in order to
+    /// Returns the set of [Source]s that need to be included in the `CompilerOutput` in order to
     /// recompile the project.
     ///
     /// We define _dirty_ sources as files that:
@@ -661,38 +669,34 @@ impl<'a, T: ArtifactOutput> ArtifactsCacheInner<'a, T> {
     ///   - their imports were changed
     ///   - their artifact is missing
     ///
-    /// A _dirty_ file is always included in the [CompilerInput].
+    /// A _dirty_ file is always included in the `CompilerInput`.
     /// A _dirty_ file can also include clean files - files that do not match any of the above
     /// criteria - which solc also requires in order to compile a dirty file.
     ///
     /// Therefore, these files will also be included in the filtered output but not marked as dirty,
-    /// so that their [OutputSelection] can be optimized in the [CompilerOutput] and their (empty)
+    /// so that their `OutputSelection` can be optimized in the `CompilerOutput` and their (empty)
     /// artifacts ignored.
     fn filter(&mut self, sources: Sources, version: &Version) -> FilteredSources {
         // all files that are not dirty themselves, but are pulled from a dirty file
         let mut imports_of_dirty = HashSet::new();
 
         // separates all source files that fit the criteria (dirty) from those that don't (clean)
-        let (mut filtered_sources, clean_sources) = sources
-            .into_iter()
-            .map(|(file, source)| self.filter_source(file, source, version))
-            .fold(
-                (BTreeMap::default(), Vec::new()),
-                |(mut dirty_sources, mut clean_sources), source| {
-                    if source.dirty {
-                        // mark all files that are imported by a dirty file
-                        imports_of_dirty.extend(self.edges.all_imported_nodes(source.idx));
-                        dirty_sources.insert(source.file, FilteredSource::Dirty(source.source));
-                    } else {
-                        clean_sources.push(source);
-                    }
-
-                    (dirty_sources, clean_sources)
-                },
-            );
+        let mut dirty_sources = BTreeMap::new();
+        let mut clean_sources = Vec::with_capacity(sources.len());
+        let mut memo = HashMap::with_capacity(sources.len());
+        for (file, source) in sources {
+            let source = self.filter_source(file, source, version, &mut memo);
+            if source.dirty {
+                // mark all files that are imported by a dirty file
+                imports_of_dirty.extend(self.edges.all_imported_nodes(source.idx));
+                dirty_sources.insert(source.file, FilteredSource::Dirty(source.source));
+            } else {
+                clean_sources.push(source);
+            }
+        }
 
         // track new cache entries for dirty files
-        for (file, filtered) in filtered_sources.iter() {
+        for (file, filtered) in dirty_sources.iter() {
             self.insert_new_cache_entry(file, filtered.source(), version.clone());
         }
 
@@ -700,12 +704,12 @@ impl<'a, T: ArtifactOutput> ArtifactsCacheInner<'a, T> {
             let FilteredSourceInfo { file, source, idx, .. } = clean_source;
             if imports_of_dirty.contains(&idx) {
                 // file is pulled in by a dirty file
-                filtered_sources.insert(file.clone(), FilteredSource::Clean(source.clone()));
+                dirty_sources.insert(file.clone(), FilteredSource::Clean(source.clone()));
             }
             self.insert_filtered_source(file, source, version.clone());
         }
 
-        filtered_sources.into()
+        dirty_sources.into()
     }
 
     /// Returns the state of the given source file.
@@ -714,61 +718,87 @@ impl<'a, T: ArtifactOutput> ArtifactsCacheInner<'a, T> {
         file: PathBuf,
         source: Source,
         version: &Version,
+        memo: &mut HashMap<PathBuf, bool>,
     ) -> FilteredSourceInfo {
         let idx = self.edges.node_id(&file);
-        if !self.is_dirty(&file, version) &&
-            self.edges.imports(&file).iter().all(|file| !self.is_dirty(file, version))
-        {
-            FilteredSourceInfo { file, source, idx, dirty: false }
-        } else {
-            FilteredSourceInfo { file, source, idx, dirty: true }
+        let dirty = self.is_dirty(&file, version, memo, true);
+        FilteredSourceInfo { file, source, idx, dirty }
+    }
+
+    /// Returns `false` if the corresponding cache entry remained unchanged, otherwise `true`.
+    #[tracing::instrument(level = "trace", skip_all, fields(file = %file.display(), version = %version))]
+    fn is_dirty(
+        &self,
+        file: &Path,
+        version: &Version,
+        memo: &mut HashMap<PathBuf, bool>,
+        check_imports: bool,
+    ) -> bool {
+        match memo.get(file) {
+            Some(&dirty) => {
+                tracing::trace!(dirty, "memoized");
+                dirty
+            }
+            None => {
+                // `check_imports` avoids infinite recursion
+                let dirty = self.is_dirty_impl(file, version) ||
+                    (check_imports &&
+                        self.edges
+                            .imports(file)
+                            .iter()
+                            .any(|file| self.is_dirty(file, version, memo, false)));
+                memo.insert(file.to_path_buf(), dirty);
+                dirty
+            }
         }
     }
 
-    /// returns `false` if the corresponding cache entry remained unchanged otherwise `true`
-    fn is_dirty(&self, file: &Path, version: &Version) -> bool {
-        if let Some(hash) = self.content_hashes.get(file) {
-            if let Some(entry) = self.cache.entry(file) {
-                if entry.content_hash.as_bytes() != hash.as_bytes() {
-                    tracing::trace!("changed content hash for source file \"{}\"", file.display());
-                    return true
-                }
-                if self.project.solc_config != entry.solc_config {
-                    tracing::trace!("changed solc config for source file \"{}\"", file.display());
-                    return true
-                }
+    fn is_dirty_impl(&self, file: &Path, version: &Version) -> bool {
+        let Some(hash) = self.content_hashes.get(file) else {
+            tracing::trace!("missing cache entry");
+            return true
+        };
 
-                // only check artifact's existence if the file generated artifacts.
-                // e.g. a solidity file consisting only of import statements (like interfaces that
-                // re-export) do not create artifacts
-                if !entry.artifacts.is_empty() {
-                    if !entry.contains_version(version) {
-                        tracing::trace!(
-                            "missing linked artifacts for source file `{}` for version \"{}\"",
-                            file.display(),
-                            version
-                        );
-                        return true
-                    }
+        let Some(entry) = self.cache.entry(file) else {
+            tracing::trace!("missing content hash");
+            return true
+        };
 
-                    if entry.artifacts_for_version(version).any(|artifact_path| {
-                        let missing_artifact = !self.cached_artifacts.has_artifact(artifact_path);
-                        if missing_artifact {
-                            tracing::trace!("missing artifact \"{}\"", artifact_path.display());
-                        }
-                        missing_artifact
-                    }) {
-                        return true
-                    }
-                }
-                // all things match, can be reused
-                return false
-            }
-            tracing::trace!("Missing cache entry for {}", file.display());
-        } else {
-            tracing::trace!("Missing content hash for {}", file.display());
+        if entry.content_hash != *hash {
+            tracing::trace!("content hash changed");
+            return true
         }
-        true
+
+        if self.project.solc_config != entry.solc_config {
+            tracing::trace!("solc config changed");
+            return true
+        }
+
+        // only check artifact's existence if the file generated artifacts.
+        // e.g. a solidity file consisting only of import statements (like interfaces that
+        // re-export) do not create artifacts
+        if entry.artifacts.is_empty() {
+            tracing::trace!("no artifacts");
+            return false
+        }
+
+        if !entry.contains_version(version) {
+            tracing::trace!("missing linked artifacts",);
+            return true
+        }
+
+        if entry.artifacts_for_version(version).any(|artifact_path| {
+            let missing_artifact = !self.cached_artifacts.has_artifact(artifact_path);
+            if missing_artifact {
+                tracing::trace!("missing artifact \"{}\"", artifact_path.display());
+            }
+            missing_artifact
+        }) {
+            return true
+        }
+
+        // all things match, can be reused
+        false
     }
 
     /// Adds the file's hashes to the set if not set yet
@@ -906,7 +936,7 @@ impl<'a, T: ArtifactOutput> ArtifactsCache<'a, T> {
         }
     }
 
-    /// Consumes the `Cache`, rebuilds the [`SolFileCache`] by merging all artifacts that were
+    /// Consumes the `Cache`, rebuilds the `SolFileCache` by merging all artifacts that were
     /// filtered out in the previous step (`Cache::filtered`) and the artifacts that were just
     /// compiled and written to disk `written_artifacts`.
     ///
@@ -917,7 +947,10 @@ impl<'a, T: ArtifactOutput> ArtifactsCache<'a, T> {
         write_to_disk: bool,
     ) -> Result<Artifacts<T::Artifact>> {
         match self {
-            ArtifactsCache::Ephemeral(_, _) => Ok(Default::default()),
+            ArtifactsCache::Ephemeral(_, _) => {
+                tracing::trace!("no cache configured, ephemeral");
+                Ok(Default::default())
+            }
             ArtifactsCache::Cached(cache) => {
                 let ArtifactsCacheInner {
                     mut cache,

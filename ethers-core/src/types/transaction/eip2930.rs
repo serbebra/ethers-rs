@@ -6,8 +6,9 @@ use open_fastrlp::{
     RlpDecodable as FastRlpDecodable, RlpDecodableWrapper as FastRlpDecodableWrapper,
     RlpEncodable as FastRlpEncodable, RlpEncodableWrapper as FastRlpEncodableWrapper,
 };
-use rlp::{Decodable, RlpStream};
-use rlp_derive::{RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper};
+use rlp::{
+    Decodable, RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper, RlpStream,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -95,6 +96,7 @@ pub enum Eip2930RequestError {
 pub struct Eip2930TransactionRequest {
     #[serde(flatten)]
     pub tx: TransactionRequest,
+    #[serde(rename = "accessList")]
     pub access_list: AccessList,
 }
 
@@ -188,9 +190,7 @@ impl From<&Transaction> for Eip2930TransactionRequest {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-    use crate::types::{transaction::eip2718::TypedTransaction, U256};
     use std::str::FromStr;
 
     #[test]
@@ -230,7 +230,6 @@ mod tests {
             .with_access_list(access_list);
         let tx: TypedTransaction = tx.into();
         let serialized = serde_json::to_string(&tx).unwrap();
-        dbg!(&serialized);
 
         // deserializes to either the envelope type or the inner type
         let de: TypedTransaction = serde_json::from_str(&serialized).unwrap();

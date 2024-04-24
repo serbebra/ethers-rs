@@ -29,6 +29,16 @@ pub struct LedgerEthereum {
     pub(crate) address: Address,
 }
 
+impl std::fmt::Display for LedgerEthereum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LedgerApp. Key at index {} with address {:?} on chain_id {}",
+            self.derivation, self.address, self.chain_id
+        )
+    }
+}
+
 const EIP712_MIN_VERSION: &str = ">=1.6.0";
 
 impl LedgerEthereum {
@@ -68,6 +78,7 @@ impl LedgerEthereum {
         Self::get_address_with_path_transport(&transport, derivation).await
     }
 
+    #[tracing::instrument(skip(transport))]
     async fn get_address_with_path_transport(
         transport: &Ledger,
         derivation: &DerivationType,
@@ -82,6 +93,7 @@ impl LedgerEthereum {
             response_len: None,
         };
 
+        tracing::debug!("Dispatching get_address request to ethereum app");
         let answer = block_on(transport.exchange(&command))?;
         let result = answer.data().ok_or(LedgerError::UnexpectedNullResponse)?;
 
@@ -93,7 +105,7 @@ impl LedgerEthereum {
             address.copy_from_slice(&hex::decode(address_str)?);
             Address::from(address)
         };
-
+        tracing::debug!(?address, "Received address from device");
         Ok(address)
     }
 
@@ -109,10 +121,15 @@ impl LedgerEthereum {
             response_len: None,
         };
 
+        tracing::debug!("Dispatching get_version");
         let answer = block_on(transport.exchange(&command))?;
         let result = answer.data().ok_or(LedgerError::UnexpectedNullResponse)?;
-
-        Ok(format!("{}.{}.{}", result[1], result[2], result[3]))
+        if result.len() < 4 {
+            return Err(LedgerError::ShortResponse { got: result.len(), at_least: 4 })
+        }
+        let version = format!("{}.{}.{}", result[1], result[2], result[3]);
+        tracing::debug!(version, "Retrieved version from device");
+        Ok(version)
     }
 
     /// Signs an Ethereum transaction (requires confirmation on the ledger)
@@ -125,7 +142,7 @@ impl LedgerEthereum {
         let mut payload = Self::path_to_bytes(&self.derivation);
         payload.extend_from_slice(tx_with_chain.rlp().as_ref());
 
-        let mut signature = self.sign_payload(INS::SIGN, payload).await?;
+        let mut signature = self.sign_payload(INS::SIGN, &payload).await?;
 
         // modify `v` value of signature to match EIP-155 for chains with large chain ID
         // The logic is derived from Ledger's library
@@ -144,6 +161,8 @@ impl LedgerEthereum {
                     (ecc_parity % 2 != 1) as u64
                 }
                 TypedTransaction::Legacy(_) => eip155_chain_id + ecc_parity,
+                #[cfg(feature = "optimism")]
+                TypedTransaction::DepositTransaction(_) => 0,
             };
         }
 
@@ -158,7 +177,7 @@ impl LedgerEthereum {
         payload.extend_from_slice(&(message.len() as u32).to_be_bytes());
         payload.extend_from_slice(message);
 
-        self.sign_payload(INS::SIGN_PERSONAL_MESSAGE, payload).await
+        self.sign_payload(INS::SIGN_PERSONAL_MESSAGE, &payload).await
     }
 
     /// Signs an EIP712 encoded domain separator and message
@@ -185,16 +204,20 @@ impl LedgerEthereum {
         payload.extend_from_slice(&domain_separator);
         payload.extend_from_slice(&struct_hash);
 
-        self.sign_payload(INS::SIGN_ETH_EIP_712, payload).await
+        self.sign_payload(INS::SIGN_ETH_EIP_712, &payload).await
     }
 
+    #[tracing::instrument(err, skip_all, fields(command = %command, payload = hex::encode(payload)))]
     // Helper function for signing either transaction data, personal messages or EIP712 derived
     // structs
     pub async fn sign_payload(
         &self,
         command: INS,
-        mut payload: Vec<u8>,
+        payload: &Vec<u8>,
     ) -> Result<Signature, LedgerError> {
+        if payload.is_empty() {
+            return Err(LedgerError::EmptyPayload)
+        }
         let transport = self.transport.lock().await;
         let mut command = APDUCommand {
             ins: command as u8,
@@ -204,25 +227,47 @@ impl LedgerEthereum {
             response_len: None,
         };
 
-        let mut result = Vec::new();
+        let mut answer = None;
+        // workaround for https://github.com/LedgerHQ/app-ethereum/issues/409
+        // TODO: remove in future version
+        let chunk_size =
+            (0..=255).rev().find(|i| payload.len() % i != 3).expect("true for any length");
 
         // Iterate in 255 byte chunks
-        while !payload.is_empty() {
-            let chunk_size = std::cmp::min(payload.len(), 255);
-            let data = payload.drain(0..chunk_size).collect::<Vec<_>>();
-            command.data = APDUData::new(&data);
+        let span = tracing::debug_span!("send_loop", index = 0, chunk = "");
+        let guard = span.entered();
+        for (index, chunk) in payload.chunks(chunk_size).enumerate() {
+            guard.record("index", index);
+            guard.record("chunk", hex::encode(chunk));
+            command.data = APDUData::new(chunk);
 
-            let answer = block_on(transport.exchange(&command))?;
-            result = answer.data().ok_or(LedgerError::UnexpectedNullResponse)?.to_vec();
+            tracing::debug!("Dispatching packet to device");
+            answer = Some(block_on(transport.exchange(&command))?);
+
+            let data = answer.as_ref().expect("just assigned").data();
+            if data.is_none() {
+                return Err(LedgerError::UnexpectedNullResponse)
+            }
+            tracing::debug!(
+                response = hex::encode(data.expect("just checked")),
+                "Received response from device"
+            );
 
             // We need more data
             command.p1 = P1::MORE as u8;
         }
-
+        drop(guard);
+        let answer = answer.expect("payload is non-empty, therefore loop ran");
+        let result = answer.data().expect("check in loop");
+        if result.len() < 65 {
+            return Err(LedgerError::ShortResponse { got: result.len(), at_least: 65 })
+        }
         let v = result[0] as u64;
         let r = U256::from_big_endian(&result[1..33]);
         let s = U256::from_big_endian(&result[33..]);
-        Ok(Signature { r, s, v })
+        let sig = Signature { r, s, v };
+        tracing::debug!(sig = %sig, "Received signature from device");
+        Ok(sig)
     }
 
     // helper which converts a derivation path to bytes
@@ -250,29 +295,10 @@ impl LedgerEthereum {
 mod tests {
     use super::*;
     use crate::Signer;
-    use ethers_contract_derive::EthAbiType;
     use ethers_core::types::{
         transaction::eip712::Eip712, Address, TransactionRequest, I256, U256,
     };
-    use ethers_derive_eip712::*;
     use std::str::FromStr;
-
-    #[derive(Debug, Clone, Eip712, EthAbiType)]
-    #[eip712(
-        name = "Eip712Test",
-        version = "1",
-        chain_id = 1,
-        verifying_contract = "0x0000000000000000000000000000000000000001",
-        salt = "eip712-test-75F0CCte"
-    )]
-    struct FooBar {
-        foo: I256,
-        bar: U256,
-        fizz: Vec<u8>,
-        buzz: [u8; 32],
-        far: String,
-        out: Address,
-    }
 
     #[tokio::test]
     #[ignore]
@@ -326,24 +352,5 @@ mod tests {
         let sig = ledger.sign_message(message).await.unwrap();
         let addr = ledger.get_address().await.unwrap();
         sig.verify(message, addr).unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_sign_eip712_struct() {
-        let ledger = LedgerEthereum::new(DerivationType::LedgerLive(0), 1u64).await.unwrap();
-
-        let foo_bar = FooBar {
-            foo: I256::from(10),
-            bar: U256::from(20),
-            fizz: b"fizz".to_vec(),
-            buzz: keccak256("buzz"),
-            far: String::from("space"),
-            out: Address::from([0; 20]),
-        };
-
-        let sig = ledger.sign_typed_struct(&foo_bar).await.expect("failed to sign typed data");
-        let foo_bar_hash = foo_bar.encode_eip712().unwrap();
-        sig.verify(foo_bar_hash, ledger.address).unwrap();
     }
 }

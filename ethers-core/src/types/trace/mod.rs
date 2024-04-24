@@ -1,7 +1,8 @@
 //! Types for the Parity Ad-Hoc Trace API
 //!
 //! <https://openethereum.github.io/wiki/JSONRPC-trace-module>
-use crate::types::{Bytes, H160, H256, U256};
+
+use super::{Bytes, Opcode, H160, H256, U256};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -10,9 +11,6 @@ pub use filter::*;
 
 mod geth;
 pub use geth::*;
-
-mod opcodes;
-pub use opcodes::*;
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 /// Description of the type of trace to make
@@ -32,7 +30,7 @@ pub enum TraceType {
 /// Ad-Hoc trace API type
 pub struct BlockTrace {
     /// Output Bytes
-    pub output: Bytes,
+    pub output: Option<Bytes>,
     /// Transaction Trace
     pub trace: Option<Vec<TransactionTrace>>,
     /// Virtual Machine Execution Trace
@@ -134,9 +132,9 @@ pub struct VMOperation {
     /// Subordinate trace of the CALL/CREATE if applicable.
     // #[serde(bound="VMTrace: Deserialize")]
     pub sub: Option<VMTrace>,
-    /// The executed opcode name
+    /// The opcode of the executed instruction
     #[serde(rename = "op")]
-    pub op: OpCode,
+    pub op: ExecutedInstruction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -176,6 +174,23 @@ pub struct StorageDiff {
     pub val: U256,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+#[allow(clippy::upper_case_acronyms)]
+/// Helper to classify the executed instruction
+pub enum ExecutedInstruction {
+    /// The instruction is recognized
+    Known(Opcode),
+    /// The instruction is not recognized
+    Unknown(String),
+}
+
+impl Default for ExecutedInstruction {
+    fn default() -> Self {
+        Self::Known(Opcode::INVALID)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +222,20 @@ mod tests {
     #[test]
     fn test_deserialize_blocktraces() {
         let _traces: Vec<BlockTrace> = serde_json::from_str(EXAMPLE_TRACES).unwrap();
+    }
+
+    #[test]
+    fn test_deserialize_unknown_opcode() {
+        let example_opcodes = r#"["GAS", "CREATE2", "CUSTOMOP"]"#;
+        let parsed_opcodes: Vec<ExecutedInstruction> =
+            serde_json::from_str(example_opcodes).unwrap();
+        assert_eq!(
+            vec![
+                ExecutedInstruction::Known(Opcode::GAS),
+                ExecutedInstruction::Known(Opcode::CREATE2),
+                ExecutedInstruction::Unknown("CUSTOMOP".to_string())
+            ],
+            parsed_opcodes
+        )
     }
 }

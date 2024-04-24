@@ -1,3 +1,5 @@
+//! Ethereum data types.
+
 pub type Selector = [u8; 4];
 
 // Re-export common ethereum datatypes with more specific names
@@ -76,3 +78,9 @@ pub mod serde_helpers;
 
 mod syncing;
 pub use syncing::{SyncProgress, SyncingStatus};
+
+mod opcode;
+pub use opcode::Opcode;
+
+mod withdrawal;
+pub use withdrawal::Withdrawal;

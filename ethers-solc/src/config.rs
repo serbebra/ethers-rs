@@ -76,8 +76,9 @@ impl ProjectPathsConfig {
         }
     }
 
-    /// Same as [Self::paths()] but strips the `root` form all paths,
-    /// [ProjectPaths::strip_prefix_all()]
+    /// Same as [`paths`][ProjectPathsConfig::paths] but strips the `root` form all paths.
+    ///
+    /// See: [`ProjectPaths::strip_prefix_all`]
     pub fn paths_relative(&self) -> ProjectPaths {
         let mut paths = self.paths();
         paths.strip_prefix_all(&self.root);
@@ -234,7 +235,7 @@ impl ProjectPathsConfig {
             })
         } else {
             // resolve library file
-            let resolved = self.resolve_library_import(import.as_ref());
+            let resolved = self.resolve_library_import(cwd.as_ref(), import.as_ref());
 
             if resolved.is_none() {
                 // absolute paths in solidity are a thing for example `import
@@ -319,28 +320,44 @@ impl ProjectPathsConfig {
     ///
     /// There is no strict rule behind this, but because [`crate::remappings::Remapping::find_many`]
     /// returns `'@openzeppelin/=node_modules/@openzeppelin/contracts/'` we should handle the
-    /// case if the remapping path ends with `contracts` and the import path starts with
-    /// `<remapping name>/contracts`. Otherwise we can end up with a resolved path that has a
+    /// case if the remapping path ends with `/contracts/` and the import path starts with
+    /// `<remapping name>/contracts/`. Otherwise we can end up with a resolved path that has a
     /// duplicate `contracts` segment:
     /// `@openzeppelin/contracts/contracts/token/ERC20/IERC20.sol` we check for this edge case
     /// here so that both styles work out of the box.
-    pub fn resolve_library_import(&self, import: &Path) -> Option<PathBuf> {
+    pub fn resolve_library_import(&self, cwd: &Path, import: &Path) -> Option<PathBuf> {
         // if the import path starts with the name of the remapping then we get the resolved path by
         // removing the name and adding the remainder to the path of the remapping
-        if let Some(path) = self.remappings.iter().find_map(|r| {
-            import.strip_prefix(&r.name).ok().map(|stripped_import| {
-                let lib_path = Path::new(&r.path).join(stripped_import);
-
-                // we handle the edge case where the path of a remapping ends with "contracts"
-                // (`<name>/=.../contracts`) and the stripped import also starts with `contracts`
-                if let Ok(adjusted_import) = stripped_import.strip_prefix("contracts/") {
-                    if r.path.ends_with("contracts/") && !lib_path.exists() {
-                        return Path::new(&r.path).join(adjusted_import)
-                    }
+        let cwd = cwd.strip_prefix(&self.root).unwrap_or(cwd);
+        if let Some(path) = self
+            .remappings
+            .iter()
+            .filter(|r| {
+                // only check remappings that are either global or for `cwd`
+                if let Some(ctx) = r.context.as_ref() {
+                    cwd.starts_with(ctx)
+                } else {
+                    true
                 }
-                lib_path
             })
-        }) {
+            .find_map(|r| {
+                import.strip_prefix(&r.name).ok().map(|stripped_import| {
+                    let lib_path = Path::new(&r.path).join(stripped_import);
+
+                    // we handle the edge case where the path of a remapping ends with "/contracts/"
+                    // (`<name>/=.../contracts/`) and the stripped import also starts with
+                    // `contracts/`
+                    if let Ok(adjusted_import) = stripped_import.strip_prefix("contracts/") {
+                        // Wrap suffix check in `/` so this prevents matching remapping paths that
+                        // end with '-contracts/', '_contracts/', '.contracts/' etc.
+                        if r.path.ends_with("/contracts/") && !lib_path.exists() {
+                            return Path::new(&r.path).join(adjusted_import)
+                        }
+                    }
+                    lib_path
+                })
+            })
+        {
             Some(self.root.join(path))
         } else {
             utils::resolve_library(&self.libraries, import)
@@ -380,7 +397,17 @@ impl ProjectPathsConfig {
     /// Flattens all file imports into a single string
     pub fn flatten(&self, target: &Path) -> Result<String> {
         tracing::trace!("flattening file");
-        let graph = Graph::resolve(self)?;
+        let mut input_files = self.input_files();
+
+        // we need to ensure that the target is part of the input set, otherwise it's not
+        // part of the graph if it's not imported by any input file
+        let flatten_target = target.to_path_buf();
+        if !input_files.contains(&flatten_target) {
+            input_files.push(flatten_target);
+        }
+
+        let sources = Source::read_all_files(input_files)?;
+        let graph = Graph::resolve_sources(self, sources)?;
         self.flatten_node(target, &graph, &mut Default::default(), false, false, false).map(|x| {
             format!("{}\n", utils::RE_THREE_OR_MORE_NEWLINES.replace_all(&x, "\n\n").trim())
         })
@@ -400,7 +427,7 @@ impl ProjectPathsConfig {
             SolcError::msg(format!("failed to get parent directory for \"{:?}\"", target.display()))
         })?;
         let target_index = graph.files().get(target).ok_or_else(|| {
-            SolcError::msg(format!("cannot resolve file at \"{:?}\"", target.display()))
+            SolcError::msg(format!("cannot resolve file at {:?}", target.display()))
         })?;
 
         if imported.contains(target_index) {
@@ -428,8 +455,7 @@ impl ProjectPathsConfig {
                 if cap.name("ignore").is_some() {
                     continue
                 }
-                if let Some(name_match) =
-                    vec!["n1", "n2", "n3"].iter().find_map(|name| cap.name(name))
+                if let Some(name_match) = ["n1", "n2", "n3"].iter().find_map(|name| cap.name(name))
                 {
                     let name_match_range =
                         utils::range_by_offset(&name_match.range(), replace_offset);
@@ -790,7 +816,8 @@ impl SolcConfigBuilder {
     }
 }
 
-/// Container for all `--include-path` arguments for Solc, se also [Solc docs](https://docs.soliditylang.org/en/v0.8.9/using-the-compiler.html#base-path-and-import-remapping
+/// Container for all `--include-path` arguments for Solc, see also
+/// [Solc docs](https://docs.soliditylang.org/en/v0.8.9/using-the-compiler.html#base-path-and-import-remapping).
 ///
 /// The `--include--path` flag:
 /// > Makes an additional source directory available to the default import callback. Use this option
@@ -911,13 +938,13 @@ mod tests {
 
         let root = root.path();
         assert_eq!(ProjectPathsConfig::find_source_dir(root), src,);
-        std::fs::File::create(&contracts).unwrap();
+        std::fs::create_dir_all(&contracts).unwrap();
         assert_eq!(ProjectPathsConfig::find_source_dir(root), contracts,);
         assert_eq!(
             ProjectPathsConfig::builder().build_with_root(root).sources,
             utils::canonicalized(contracts),
         );
-        std::fs::File::create(&src).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
         assert_eq!(ProjectPathsConfig::find_source_dir(root), src,);
         assert_eq!(
             ProjectPathsConfig::builder().build_with_root(root).sources,
@@ -925,18 +952,19 @@ mod tests {
         );
 
         assert_eq!(ProjectPathsConfig::find_artifacts_dir(root), out,);
-        std::fs::File::create(&artifacts).unwrap();
+        std::fs::create_dir_all(&artifacts).unwrap();
         assert_eq!(ProjectPathsConfig::find_artifacts_dir(root), artifacts,);
         assert_eq!(
             ProjectPathsConfig::builder().build_with_root(root).artifacts,
             utils::canonicalized(artifacts),
         );
+        std::fs::create_dir_all(&build_infos).unwrap();
         assert_eq!(
             ProjectPathsConfig::builder().build_with_root(root).build_infos,
             utils::canonicalized(build_infos)
         );
 
-        std::fs::File::create(&out).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
         assert_eq!(ProjectPathsConfig::find_artifacts_dir(root), out,);
         assert_eq!(
             ProjectPathsConfig::builder().build_with_root(root).artifacts,
@@ -944,13 +972,13 @@ mod tests {
         );
 
         assert_eq!(ProjectPathsConfig::find_libs(root), vec![lib.clone()],);
-        std::fs::File::create(&node_modules).unwrap();
+        std::fs::create_dir_all(&node_modules).unwrap();
         assert_eq!(ProjectPathsConfig::find_libs(root), vec![node_modules.clone()],);
         assert_eq!(
             ProjectPathsConfig::builder().build_with_root(root).libraries,
             vec![utils::canonicalized(node_modules)],
         );
-        std::fs::File::create(&lib).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
         assert_eq!(ProjectPathsConfig::find_libs(root), vec![lib.clone()],);
         assert_eq!(
             ProjectPathsConfig::builder().build_with_root(root).libraries,
@@ -976,6 +1004,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "Windows remappings #2347")]
     fn can_find_library_ancestor() {
         let mut config = ProjectPathsConfig::builder().lib("lib").build().unwrap();
         config.root = "/root/".into();

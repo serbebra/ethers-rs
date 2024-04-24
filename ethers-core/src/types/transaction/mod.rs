@@ -5,7 +5,9 @@ pub mod eip1559;
 pub mod eip2718;
 pub mod eip2930;
 
-#[cfg(feature = "eip712")]
+#[cfg(feature = "optimism")]
+pub mod optimism;
+
 pub mod eip712;
 
 pub(crate) const BASE_NUM_TX_FIELDS: usize = 9;
@@ -75,7 +77,7 @@ fn decode_signature(
 fn decode_to(
     rlp: &rlp::Rlp,
     offset: &mut usize,
-) -> Result<Option<super::NameOrAddress>, rlp::DecoderError> {
+) -> Result<Option<super::Address>, rlp::DecoderError> {
     let to = {
         let to = rlp.at(*offset)?;
         if to.is_empty() {
