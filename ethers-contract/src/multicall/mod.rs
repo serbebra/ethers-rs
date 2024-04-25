@@ -12,7 +12,7 @@ use crate::{
 };
 
 mod multicall_contract;
-use multicall_contract::multicall_3::{
+pub use multicall_contract::multicall_3::{
     Call as Multicall1Call, Call3 as Multicall3Call, Call3Value as Multicall3CallValue,
     Result as MulticallResult,
 };
@@ -827,7 +827,7 @@ impl<M: Middleware> Multicall<M> {
     }
 
     /// v3
-    fn as_aggregate_3(&self) -> ContractCall<M, Vec<MulticallResult>> {
+    pub fn as_aggregate_3(&self) -> ContractCall<M, Vec<MulticallResult>> {
         // Map the calls vector into appropriate types for `aggregate_3` function
         let calls: Vec<Multicall3Call> = self
             .calls
@@ -854,7 +854,7 @@ impl<M: Middleware> Multicall<M> {
     }
 
     /// v3 + values (only .send())
-    fn as_aggregate_3_value(&self) -> ContractCall<M, Vec<MulticallResult>> {
+    pub fn as_aggregate_3_value(&self) -> ContractCall<M, Vec<MulticallResult>> {
         // Map the calls vector into appropriate types for `aggregate_3_value` function
         let mut total_value = U256::zero();
         let calls: Vec<Multicall3CallValue> = self
