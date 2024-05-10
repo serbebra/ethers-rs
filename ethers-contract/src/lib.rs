@@ -2,41 +2,36 @@
 #![doc = include_str!("../README.md")]
 #![deny(unsafe_code)]
 
-mod contract;
-pub use contract::Contract;
-
 mod base;
-pub use base::{decode_function_data, encode_function_data, AbiError, BaseContract};
-
 mod call;
-pub use call::{ContractError, EthCall};
-
+mod contract;
 mod error;
-pub use error::EthError;
-
-mod factory;
-pub use factory::{ContractDeployer, ContractFactory};
-
 mod event;
-pub use event::{EthEvent, Event};
-
+mod factory;
 mod log;
+
+pub use base::{decode_function_data, encode_function_data, AbiError, BaseContract};
+pub use call::{ContractError, EthCall};
+pub use contract::Contract;
+pub use error::EthError;
+pub use event::{EthEvent, Event};
+pub use factory::{ContractDeployer, ContractFactory};
 pub use log::{decode_logs, EthLogDecode, LogMeta};
 
+// `stream` module is empty in this snippet; assuming it is implemented elsewhere
 pub mod stream;
 
+// Conditional compilation for the `multicall` and related ABIGEN features
 #[cfg(any(test, feature = "abigen"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "abigen")))]
 mod multicall;
 #[cfg(any(test, feature = "abigen"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "abigen")))]
 pub use multicall::{
     Multicall, MulticallContract, MulticallError, MulticallResult, MulticallVersion,
     MULTICALL_ADDRESS, MULTICALL_SUPPORTED_CHAIN_IDS,
 };
 
-/// This module exposes low lever builder structures which are only consumed by the
-/// type-safe ABI bindings generators.
+// `builders` module is hidden from the docs as it's intended for internal use
 #[doc(hidden)]
 pub mod builders {
     pub use super::{
@@ -46,21 +41,21 @@ pub mod builders {
     };
 }
 
-#[cfg(any(test, feature = "abigen"))]
+// Re-exporting `abigen` related items only when `abigen` feature is enabled
+#[cfg(feature = "abigen")]
 #[cfg_attr(docsrs, doc(cfg(feature = "abigen")))]
 pub use ethers_contract_abigen::{
     Abigen, ContractFilter, ExcludeContracts, InternalStructs, MultiAbigen, SelectContracts,
 };
-
-#[cfg(any(test, feature = "abigen"))]
-#[cfg_attr(docsrs, doc(cfg(feature = "abigen")))]
+#[cfg(feature = "abigen")]
 pub use ethers_contract_derive::{
     abigen, EthAbiCodec, EthAbiType, EthCall, EthDisplay, EthError, EthEvent,
 };
 
-// Hide the Lazy re-export, it's just for convenience
+// Re-export `Lazy` but hidden from the documentation
 #[doc(hidden)]
 pub use once_cell::sync::Lazy;
 
+// Conditionally compile and export `eip712` related features
 #[cfg(feature = "eip712")]
 pub use ethers_derive_eip712::*;
